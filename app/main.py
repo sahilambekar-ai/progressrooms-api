@@ -11,6 +11,7 @@ from app.modules.commerce.router import router as commerce_router
 from app.modules.attendance.router import router as attendance_router
 from app.modules.websites.router import router as website_router
 from app.modules.student.router import router as student_router
+from app.modules.students.router import router as students_directory_router
 from app.modules.admin.router import router as admin_router
 
 app = FastAPI(
@@ -41,6 +42,7 @@ api_v1.include_router(commerce_router)
 api_v1.include_router(attendance_router)
 api_v1.include_router(website_router)
 api_v1.include_router(student_router)
+api_v1.include_router(students_directory_router)
 api_v1.include_router(admin_router)
 
 app.mount(settings.API_V1_STR, api_v1)
