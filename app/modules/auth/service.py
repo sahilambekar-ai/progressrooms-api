@@ -6,11 +6,12 @@ from app.models.user import User, UserAuthMethod
 from app.core.security import generate_otp, create_access_token
 from app.core.config import settings
 from app.common.dates import ensure_utc
+from app.core.email_service import send_otp_email
 
 class AuthService:
     @staticmethod
     async def request_otp(db: AsyncSession, email: str) -> tuple[str, bool]:
-        """Generates an OTP for the given email, creating user auth method record."""
+        """Generates an OTP for the given email, creating user auth method record and sending email."""
         if email.endswith(".local") or email.endswith(".test"):
             otp_code = "123456"
         else:
@@ -48,9 +49,19 @@ class AuthService:
             db.add(auth_method)
         else:
             auth_method.otp_code = otp_code
-            auth_method.otp_expires_at = expires_at
-
         await db.commit()
+
+        # Send email via Brevo
+        try:
+            await send_otp_email(
+                to_email=email,
+                to_name=user.full_name,
+                otp_code=otp_code,
+                purpose="LOGIN_VERIFICATION"
+            )
+        except Exception:
+            pass  # Fallback to in-app code preview without blocking development
+
         return otp_code, True
 
     @staticmethod

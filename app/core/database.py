@@ -4,13 +4,26 @@ from typing import AsyncGenerator
 from sqlalchemy import DateTime
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.ext.compiler import compiles
 from app.core.config import settings
+
+# SQLite compatibility compiler rules for local zero-config execution
+@compiles(UUID, "sqlite")
+def compile_uuid_sqlite(type_, compiler, **kw):
+    return "VARCHAR(36)"
+
+@compiles(JSONB, "sqlite")
+def compile_jsonb_sqlite(type_, compiler, **kw):
+    return "TEXT"
+
+is_sqlite = settings.DATABASE_URL.startswith("sqlite")
 
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     future=True,
-    pool_pre_ping=True
+    pool_pre_ping=True if not is_sqlite else False
 )
 
 AsyncSessionLocal = async_sessionmaker(

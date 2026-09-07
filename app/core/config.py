@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_SECRET: str = "rzp_secret_mock_progressrooms"
     RAZORPAY_WEBHOOK_SECRET: str = "rzp_webhook_secret_mock"
     
+    # Brevo Mail Service Configuration
+    BREVO_API_KEY: str = ""
+    BREVO_SENDER_EMAIL: str = "sahilambekar.dev@gmail.com"
+    BREVO_SENDER_NAME: str = "ProgressRooms Virtual Studio"
+    BREVO_ENABLED: bool = True
+    
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()

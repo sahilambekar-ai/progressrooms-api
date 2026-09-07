@@ -3,6 +3,8 @@ __pycache__/
 *$py.class
 *.so
 .Python
+*.db
+progressrooms.db
 env/
 build/
 develop-eggs/
