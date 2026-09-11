@@ -26,7 +26,7 @@ async def get_current_user(
         if "superadmin" in token_str:
             stmt = select(User).where(User.is_superadmin == True)
         elif "instructor" in token_str or "owner" in token_str or "studio" in token_str:
-            stmt = select(User).where(User.email.in_(["owner@yogastudio.test", "ananya@yogastudio.test"]))
+            stmt = select(User).where(User.email == "owner@yogastudio.test")
         else:
             stmt = select(User).where(User.email.like("student%"))
         

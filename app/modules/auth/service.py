@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User, UserAuthMethod
 from app.models.otp import UserOtp
-from app.models.organization import Organization, OrganizationMember, OrganizationStudent
+from app.models.organization import Organization, OrganizationMember, OrganizationStudent, OrganizationSetting
 from app.core.security import create_access_token, verify_password, get_password_hash
 from app.core.config import settings
 from app.common.dates import ensure_utc
@@ -114,6 +114,16 @@ class AuthService:
                     is_active=True
                 )
                 db.add(new_member)
+
+                new_settings = OrganizationSetting(
+                    organization_id=new_org.id,
+                    phone=phone.strip() if phone else None,
+                    support_phone=phone.strip() if phone else None,
+                    support_email=email_clean,
+                    account_completed=False,
+                    completion_step=1
+                )
+                db.add(new_settings)
         else:
             # Student role: associate with primary studio
             org_stmt = select(Organization).limit(1)
@@ -472,6 +482,9 @@ class AuthService:
         org_id = None
         org_name = None
         org_slug = None
+        account_completed = False
+        completion_step = 1
+        zoom_connected = False
 
         mem_stmt = select(OrganizationMember, Organization).join(
             Organization, Organization.id == OrganizationMember.organization_id
@@ -484,6 +497,24 @@ class AuthService:
             org_id = str(org.id)
             org_name = org.name
             org_slug = org.slug
+
+            set_stmt = select(OrganizationSetting).where(OrganizationSetting.organization_id == org.id)
+            org_settings = (await db.execute(set_stmt)).scalar_one_or_none()
+            if org_settings:
+                account_completed = org_settings.account_completed
+                completion_step = org_settings.completion_step
+                zoom_connected = org_settings.zoom_connected
+            else:
+                new_settings = OrganizationSetting(
+                    organization_id=org.id,
+                    phone=user.phone,
+                    support_phone=user.phone,
+                    support_email=user.email,
+                    account_completed=False,
+                    completion_step=1
+                )
+                db.add(new_settings)
+                await db.commit()
 
         token = create_access_token({
             "sub": str(user.id),
@@ -508,6 +539,9 @@ class AuthService:
                 "organization_name": org_name,
                 "organization_slug": org_slug,
                 "is_verified": True,
-                "account_status": user.account_status
+                "account_status": user.account_status,
+                "account_completed": account_completed,
+                "completion_step": completion_step,
+                "zoom_connected": zoom_connected
             }
         }

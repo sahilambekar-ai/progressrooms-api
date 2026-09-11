@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
+from app.models.organization import Organization, OrganizationMember, OrganizationSetting
 from app.modules.auth.schemas import (
     RegisterRequest,
     RegisterResponse,
@@ -72,6 +74,44 @@ async def verify_otp(payload: VerifyOTPRequest, db: AsyncSession = Depends(get_d
         purpose=payload.purpose,
         full_name=payload.full_name
     )
+    user_role = "SUPER_ADMIN" if user.is_superadmin else "STUDENT"
+    org_id = None
+    org_name = None
+    org_slug = None
+    account_completed = False
+    completion_step = 1
+    zoom_connected = False
+
+    mem_stmt = select(OrganizationMember, Organization).join(
+        Organization, Organization.id == OrganizationMember.organization_id
+    ).where(OrganizationMember.user_id == user.id)
+    mem_res = await db.execute(mem_stmt)
+    mem_row = mem_res.first()
+    if mem_row:
+        member, org = mem_row
+        user_role = member.role
+        org_id = str(org.id)
+        org_name = org.name
+        org_slug = org.slug
+
+        set_stmt = select(OrganizationSetting).where(OrganizationSetting.organization_id == org.id)
+        org_settings = (await db.execute(set_stmt)).scalar_one_or_none()
+        if org_settings:
+            account_completed = org_settings.account_completed
+            completion_step = org_settings.completion_step
+            zoom_connected = org_settings.zoom_connected
+        else:
+            new_settings = OrganizationSetting(
+                organization_id=org.id,
+                phone=user.phone,
+                support_phone=user.phone,
+                support_email=user.email,
+                account_completed=False,
+                completion_step=1
+            )
+            db.add(new_settings)
+            await db.commit()
+
     return TokenResponse(
         access_token=token,
         token_type="bearer",
@@ -80,8 +120,15 @@ async def verify_otp(payload: VerifyOTPRequest, db: AsyncSession = Depends(get_d
             "email": user.email,
             "full_name": user.full_name,
             "is_superadmin": user.is_superadmin,
+            "role": user_role,
+            "organization_id": org_id,
+            "organization_name": org_name,
+            "organization_slug": org_slug,
             "is_verified": getattr(user, "is_verified", True),
-            "account_status": getattr(user, "account_status", "ACTIVE")
+            "account_status": getattr(user, "account_status", "ACTIVE"),
+            "account_completed": account_completed,
+            "completion_step": completion_step,
+            "zoom_connected": zoom_connected
         }
     )
 
