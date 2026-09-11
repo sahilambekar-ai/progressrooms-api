@@ -1,6 +1,20 @@
 from pydantic import BaseModel, EmailStr
 import uuid
 
+class RegisterRequest(BaseModel):
+    full_name: str
+    email: str
+    phone: str | None = None
+    role: str = "STUDIO" # "STUDIO" or "STUDENT"
+    studio_name: str | None = None
+
+class RegisterResponse(BaseModel):
+    message: str
+    email: str
+    is_verified: bool = False
+    otp_record_id: str | None = None
+    otp_preview: str | None = None
+
 class RequestOTPRequest(BaseModel):
     email: str
     purpose: str = "LOGIN_VERIFICATION"
@@ -9,6 +23,8 @@ class RequestOTPResponse(BaseModel):
     message: str
     otp_record_id: str | None = None
     otp_preview: str | None = None # Included in development/test environment for easy access
+    is_verified: bool = True
+    requires_activation: bool = False
 
 class VerifyOTPRequest(BaseModel):
     email: str

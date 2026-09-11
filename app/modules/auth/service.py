@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User, UserAuthMethod
 from app.models.otp import UserOtp
+from app.models.organization import Organization, OrganizationMember, OrganizationStudent
 from app.core.security import create_access_token
 from app.core.config import settings
 from app.common.dates import ensure_utc
@@ -21,18 +23,92 @@ def _hash_string(value: str) -> str:
 
 class AuthService:
     @staticmethod
-    async def request_otp(
+    async def register_user(
         db: AsyncSession,
+        full_name: str,
         email: str,
-        purpose: str = "LOGIN_VERIFICATION"
-    ) -> tuple[str, str, bool]:
+        phone: str | None = None,
+        role: str = "STUDIO",
+        studio_name: str | None = None
+    ) -> tuple[str, str, str]:
         """
-        Generates a 6-digit OTP, saves its SHA-256 hash to user_otps, 
-        and dispatches the transactional email via Brevo.
+        Creates a new unverified user (and studio organization if role is studio),
+        generates an email verification OTP, and dispatches it via Brevo.
         """
         email_clean = email.strip().lower()
+        stmt = select(User).where(User.email == email_clean)
+        res = await db.execute(stmt)
+        user = res.scalar_one_or_none()
 
-        # Dev test accounts use fixed OTP 123456; real emails get random 6-digit OTP
+        if user and user.is_verified:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="An account with this email already exists and is verified. Please log in directly."
+            )
+
+        if not user:
+            user = User(
+                email=email_clean,
+                full_name=full_name.strip(),
+                phone=phone.strip() if phone else None,
+                is_superadmin=(email_clean == "admin@test.progressrooms.local"),
+                is_verified=False,
+                account_status="PENDING_VERIFICATION"
+            )
+            db.add(user)
+            await db.flush()
+        else:
+            user.full_name = full_name.strip()
+            if phone:
+                user.phone = phone.strip()
+            user.is_verified = False
+            user.account_status = "PENDING_VERIFICATION"
+
+        # Setup Studio Organization if Studio/Instructor role
+        if role.upper() in ["STUDIO", "INSTRUCTOR", "OWNER"]:
+            mem_stmt = select(OrganizationMember).where(OrganizationMember.user_id == user.id)
+            existing_mem = (await db.execute(mem_stmt)).scalar_one_or_none()
+            if not existing_mem:
+                org_display_name = (studio_name.strip() if studio_name else f"{full_name.strip()} Sanctuary")
+                base_slug = re.sub(r'[^a-z0-9]+', '-', org_display_name.lower()).strip('-') or "sanctuary"
+                slug = f"{base_slug}-{uuid.uuid4().hex[:6]}"
+                new_org = Organization(
+                    name=org_display_name,
+                    slug=slug,
+                    timezone="Asia/Kolkata",
+                    currency="INR",
+                    status="ACTIVE"
+                )
+                db.add(new_org)
+                await db.flush()
+
+                new_member = OrganizationMember(
+                    organization_id=new_org.id,
+                    user_id=user.id,
+                    role="OWNER",
+                    title="Studio Founder & Lead Guide",
+                    bio="Lead instructor and sanctuary director.",
+                    is_active=True
+                )
+                db.add(new_member)
+        else:
+            # Student role: associate with primary studio
+            org_stmt = select(Organization).limit(1)
+            first_org = (await db.execute(org_stmt)).scalar_one_or_none()
+            if first_org:
+                stu_stmt = select(OrganizationStudent).where(
+                    OrganizationStudent.organization_id == first_org.id,
+                    OrganizationStudent.user_id == user.id
+                )
+                existing_stu = (await db.execute(stu_stmt)).scalar_one_or_none()
+                if not existing_stu:
+                    db.add(OrganizationStudent(
+                        organization_id=first_org.id,
+                        user_id=user.id,
+                        status="ACTIVE"
+                    ))
+
+        # Generate Email Verification OTP
         if email_clean.endswith(".local") or email_clean.endswith(".test"):
             otp_code = "123456"
         else:
@@ -42,23 +118,91 @@ class AuthService:
         now_utc = datetime.now(timezone.utc)
         expires_at = now_utc + timedelta(minutes=settings.OTP_EXPIRE_MINUTES)
 
-        # 1. Ensure user exists
+        otp_record = UserOtp(
+            user_id=user.id,
+            email=email_clean,
+            otp_hash=otp_hash,
+            purpose="EMAIL_VERIFICATION",
+            attempts=0,
+            expires_at=expires_at,
+            verified_at=None
+        )
+        db.add(otp_record)
+        await db.commit()
+        await db.refresh(otp_record)
+
+        print("\n" + "="*60)
+        print(f"🌿  [NEW REGISTRATION OTP FOR: {email_clean}]")
+        print(f"👉  CODE: {otp_code}")
+        print(f"🎯  PURPOSE: EMAIL_VERIFICATION")
+        print(f"⏰  EXPIRES: {settings.OTP_EXPIRE_MINUTES} minutes")
+        print("="*60 + "\n")
+        logger.info(f"🌿 [Registration OTP] Email: {email_clean} | Code: {otp_code} | Record: {otp_record.id}")
+
+        try:
+            await send_otp_email(
+                to_email=email_clean,
+                to_name=user.full_name or email_clean,
+                otp_code=otp_code,
+                purpose="EMAIL_VERIFICATION"
+            )
+        except Exception as e:
+            logger.error(f"[Brevo Send Error] {str(e)}")
+
+        msg = f"Registration successful! Please log in with the OTP sent to {email_clean} to verify and activate your account."
+        return otp_code, str(otp_record.id), msg
+
+    @staticmethod
+    async def request_otp(
+        db: AsyncSession,
+        email: str,
+        purpose: str = "LOGIN_VERIFICATION"
+    ) -> tuple[str, str, bool, bool, str]:
+        """
+        Generates an OTP for sign in. Checks if user is verified.
+        If unverified, flags requires_activation=True and returns appropriate message.
+        """
+        email_clean = email.strip().lower()
+
+        if email_clean.endswith(".local") or email_clean.endswith(".test"):
+            otp_code = "123456"
+        else:
+            otp_code = f"{secrets.randbelow(900000) + 100000}"
+
+        otp_hash = _hash_string(otp_code)
+        now_utc = datetime.now(timezone.utc)
+        expires_at = now_utc + timedelta(minutes=settings.OTP_EXPIRE_MINUTES)
+
         stmt = select(User).where(User.email == email_clean)
         result = await db.execute(stmt)
         user = result.scalar_one_or_none()
 
+        is_verified = True
+        requires_activation = False
+
         if not user:
+            # User does not exist, create unverified
             user = User(
                 email=email_clean,
                 full_name=email_clean.split("@")[0].replace(".", " ").title(),
                 is_superadmin=(email_clean == "admin@test.progressrooms.local"),
                 is_verified=False,
-                account_status="ACTIVE"
+                account_status="PENDING_VERIFICATION"
             )
             db.add(user)
             await db.flush()
+            is_verified = False
+            requires_activation = True
+            msg = f"Your account is not verified yet. An activation OTP has been dispatched to {email_clean} to activate your account."
+        elif not getattr(user, "is_verified", False) or user.account_status == "PENDING_VERIFICATION":
+            is_verified = False
+            requires_activation = True
+            msg = f"Your account is not verified yet. An activation OTP has been dispatched to {email_clean} to activate your account."
+        else:
+            is_verified = True
+            requires_activation = False
+            msg = f"Login OTP successfully sent to {email_clean}."
 
-        # 2. Insert into user_otps table (Aerial Yoga schema)
         otp_record = UserOtp(
             user_id=user.id,
             email=email_clean,
@@ -70,7 +214,6 @@ class AuthService:
         )
         db.add(otp_record)
 
-        # 3. Also update UserAuthMethod for fallback compatibility
         auth_stmt = select(UserAuthMethod).where(
             UserAuthMethod.user_id == user.id,
             UserAuthMethod.auth_type == "OTP"
@@ -93,29 +236,25 @@ class AuthService:
         await db.commit()
         await db.refresh(otp_record)
 
-        # 4. Console log matching aerial yoga pattern
         print("\n" + "="*60)
-        print(f"📨  [OTP VERIFICATION CODE FOR: {email_clean}]")
+        print(f"📨  [{'ACTIVATION' if requires_activation else 'LOGIN'} OTP FOR: {email_clean}]")
         print(f"👉  CODE: {otp_code}")
         print(f"🎯  PURPOSE: {purpose}")
         print(f"⏰  EXPIRES: {settings.OTP_EXPIRE_MINUTES} minutes")
         print("="*60 + "\n")
-        logger.info(f"📨 [OTP Generated] Email: {email_clean} | OTP: {otp_code} | Purpose: {purpose} | Record: {otp_record.id}")
+        logger.info(f"📨 [OTP Generated] Email: {email_clean} | Code: {otp_code} | Needs Activation: {requires_activation}")
 
-        # 5. Dispatch OTP email via Brevo REST API v3
         try:
-            email_res = await send_otp_email(
+            await send_otp_email(
                 to_email=email_clean,
                 to_name=user.full_name or email_clean,
                 otp_code=otp_code,
-                purpose=purpose
+                purpose="EMAIL_VERIFICATION" if requires_activation else purpose
             )
-            if not email_res.get("success"):
-                logger.warning(f"[Brevo Send Warning] {email_res.get('error')}: {email_res.get('details', '')}")
         except Exception as e:
-            logger.error(f"[Brevo Send Exception] Failed to send email: {str(e)}")
+            logger.error(f"[Brevo Send Error] {str(e)}")
 
-        return otp_code, str(otp_record.id), True
+        return otp_code, str(otp_record.id), is_verified, requires_activation, msg
 
     @staticmethod
     async def verify_otp(
@@ -128,11 +267,11 @@ class AuthService:
         """
         Verifies the 6-digit OTP against SHA-256 hash in user_otps table.
         Enforces 10-min expiration and 5-attempt rate limiting.
+        Activates unverified accounts upon success.
         """
         email_clean = email.strip().lower()
         code_clean = otp_code.strip()
 
-        # 1. Fetch user
         stmt = select(User).where(User.email == email_clean)
         res = await db.execute(stmt)
         user = res.scalar_one_or_none()
@@ -143,22 +282,21 @@ class AuthService:
                 detail="User with this email not found."
             )
 
-        # 2. Query latest unverified OTP record from user_otps table
+        # Allow verifying either LOGIN_VERIFICATION or EMAIL_VERIFICATION
         otp_stmt = (
             select(UserOtp)
             .where(
                 UserOtp.user_id == user.id,
-                UserOtp.purpose == purpose,
                 UserOtp.verified_at.is_(None)
             )
             .order_by(UserOtp.created_at.desc())
+            .limit(1)
         )
         otp_res = await db.execute(otp_stmt)
-        otp_record = otp_res.scalar_one_or_none()
+        otp_record = otp_res.scalars().first()
 
         now = datetime.now(timezone.utc)
 
-        # If no user_otps record found, check fallback UserAuthMethod
         if not otp_record:
             auth_stmt = select(UserAuthMethod).where(
                 UserAuthMethod.user_id == user.id,
@@ -178,7 +316,6 @@ class AuthService:
                     detail="Verification passcode has expired. Please request a new one."
                 )
         else:
-            # 3. Check expiration
             expires_at = ensure_utc(otp_record.expires_at)
             if expires_at and now > expires_at:
                 raise HTTPException(
@@ -186,14 +323,12 @@ class AuthService:
                     detail="Verification passcode has expired. Please request a new one."
                 )
 
-            # 4. Check max attempts (5 attempts limit)
             if otp_record.attempts >= 5:
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail="Too many failed verification attempts. Please request a new passcode."
                 )
 
-            # 5. Check SHA-256 hash match
             expected_hash = _hash_string(code_clean)
             is_test_account = email_clean.endswith(".local") or email_clean.endswith(".test")
             is_match = (otp_record.otp_hash == expected_hash) or (is_test_account and code_clean == "123456")
@@ -207,17 +342,15 @@ class AuthService:
                     detail=f"Invalid verification code. {remaining} attempt(s) remaining."
                 )
 
-            # Mark OTP as verified
             otp_record.verified_at = now
 
-        # 6. Update user verification & login state
+        # Activate user account
         user.is_verified = True
         user.account_status = "ACTIVE"
         user.last_login_at = now
         if full_name:
             user.full_name = full_name
 
-        # Clear active OTP code in UserAuthMethod
         auth_stmt = select(UserAuthMethod).where(
             UserAuthMethod.user_id == user.id,
             UserAuthMethod.auth_type == "OTP"
@@ -230,12 +363,11 @@ class AuthService:
         await db.commit()
         await db.refresh(user)
 
-        # 7. Generate JWT access token
         token = create_access_token({
             "sub": str(user.id),
             "email": user.email,
             "is_superadmin": user.is_superadmin
         })
 
-        logger.info(f"✅ [OTP Verified] User {user.email} successfully logged in.")
+        logger.info(f"✅ [Account Verified & Logged In] User: {user.email} (Status: {user.account_status})")
         return token, user

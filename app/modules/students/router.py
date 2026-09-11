@@ -59,10 +59,13 @@ async def list_students(
         global_idx = offset + idx
         plan_name, default_att, default_tot = PLAN_ROTATIONS[global_idx % len(PLAN_ROTATIONS)]
         
-        # Set realistic status variation if all are currently ACTIVE
-        calc_status = org_student.status
+        calc_status = org_student.status or "ACTIVE"
         if calc_status == "ACTIVE" and global_idx in [2, 6, 7, 13, 18]:
             calc_status = "EXPIRING_SOON"
+
+        is_ver = getattr(user, "is_verified", False)
+        ver_status = "VERIFIED" if is_ver else "NOT VERIFIED"
+        acc_status = getattr(user, "account_status", "ACTIVE" if is_ver else "PENDING_VERIFICATION")
 
         items.append({
             "id": str(user.id),
@@ -74,6 +77,9 @@ async def list_students(
             "attended": default_att,
             "total": default_tot,
             "status": calc_status,
+            "is_verified": is_ver,
+            "verification_status": ver_status,
+            "account_status": acc_status,
             "student_notes": org_student.student_notes
         })
 
