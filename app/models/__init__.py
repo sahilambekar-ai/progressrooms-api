@@ -1,5 +1,6 @@
 from app.core.database import Base
 from app.models.user import User, UserAuthMethod, UserSession
+from app.models.otp import UserOtp
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent, OrganizationSetting
 from app.models.plan import Plan, PlanFeature, OrganizationSubscription
 from app.models.session import ClassType, Session, SessionInstructor, SessionPricing, SessionRequirement
@@ -15,6 +16,7 @@ __all__ = [
     "User",
     "UserAuthMethod",
     "UserSession",
+    "UserOtp",
     "Organization",
     "OrganizationMember",
     "OrganizationStudent",

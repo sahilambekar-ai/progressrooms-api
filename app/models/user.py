@@ -15,7 +15,11 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     avatar_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    account_status: Mapped[str] = mapped_column(String(50), default="ACTIVE", nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    otps: Mapped[list["UserOtp"]] = relationship("UserOtp", back_populates="user", cascade="all, delete-orphan")
     auth_methods: Mapped[list["UserAuthMethod"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     memberships: Mapped[list["OrganizationMember"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     enrollments: Mapped[list["SessionEnrollment"]] = relationship(back_populates="user")
