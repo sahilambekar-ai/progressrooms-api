@@ -4,6 +4,8 @@ from app.core.database import get_db
 from app.modules.auth.schemas import (
     RegisterRequest,
     RegisterResponse,
+    LoginRequest,
+    LoginResponse,
     RequestOTPRequest,
     RequestOTPResponse,
     VerifyOTPRequest,
@@ -22,6 +24,7 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         db=db,
         full_name=payload.full_name,
         email=payload.email,
+        password=payload.password,
         phone=payload.phone,
         role=payload.role,
         studio_name=payload.studio_name
@@ -33,6 +36,15 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         otp_record_id=record_id,
         otp_preview=otp_code
     )
+
+@router.post("/login", response_model=LoginResponse)
+async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
+    result = await AuthService.login_with_password(
+        db=db,
+        email=payload.email,
+        password=payload.password
+    )
+    return LoginResponse(**result)
 
 @router.post("/request-otp", response_model=RequestOTPResponse)
 @router.post("/otp/generate", response_model=RequestOTPResponse)

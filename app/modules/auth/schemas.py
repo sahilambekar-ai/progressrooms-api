@@ -4,6 +4,7 @@ import uuid
 class RegisterRequest(BaseModel):
     full_name: str
     email: str
+    password: str | None = None
     phone: str | None = None
     role: str = "STUDIO" # "STUDIO" or "STUDENT"
     studio_name: str | None = None
@@ -13,6 +14,19 @@ class RegisterResponse(BaseModel):
     email: str
     is_verified: bool = False
     otp_record_id: str | None = None
+    otp_preview: str | None = None
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class LoginResponse(BaseModel):
+    access_token: str | None = None
+    token_type: str = "bearer"
+    user: dict | None = None
+    is_verified: bool = True
+    requires_activation: bool = False
+    message: str | None = None
     otp_preview: str | None = None
 
 class RequestOTPRequest(BaseModel):
