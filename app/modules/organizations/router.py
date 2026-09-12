@@ -40,6 +40,7 @@ class MemberInvite(BaseModel):
 class StudioProfileUpdate(BaseModel):
     name: str | None = None
     phone: str | None = None
+    whatsapp_number: str | None = None
     support_email: str | None = None
     studio_tagline: str | None = None
     disciplines: str | None = None
@@ -67,6 +68,7 @@ class StudioProfileUpdate(BaseModel):
     zoom_host_video: bool | None = None
     account_completed: bool | None = None
     completion_step: int | None = None
+    completion_percentage: int | None = None
 
 class ZoomConnectRequest(BaseModel):
     account_email: str | None = None
@@ -90,6 +92,30 @@ def mask_account_number(acc: str | None) -> str | None:
     if len(acc_clean) <= 4:
         return acc_clean
     return f"{'•' * (len(acc_clean) - 4)}{acc_clean[-4:]}"
+
+def compute_completion_percentage(settings: OrganizationSetting, org: Organization) -> int:
+    if settings.account_completed:
+        return 100
+    score = 0
+    # Step 1: Studio Name & Mobile Phone (17%)
+    if (org.name and org.name.strip()) and (settings.phone and settings.phone.strip()):
+        score += 17
+    # Step 2: Location (17%)
+    if settings.address_line1 and settings.city and settings.state and settings.pincode:
+        score += 17
+    # Step 3: Legal / GST (16%)
+    if settings.legal_business_name and (not settings.has_gst or (settings.has_gst and settings.gst_number)):
+        score += 16
+    # Step 4: Bank Payouts (17%)
+    if settings.bank_name and settings.account_holder_name and settings.account_number_enc and settings.ifsc_code:
+        score += 17
+    # Step 5: Zoom Video (17%)
+    if settings.zoom_connected and settings.zoom_account_email:
+        score += 17
+    # Step 6: Full Launch Review
+    if settings.completion_step >= 6 and settings.account_completed:
+        return 100
+    return min(score, 84)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -216,11 +242,14 @@ async def get_studio_profile(
     )
     zoom_int = (await db.execute(zoom_stmt)).scalar_one_or_none()
 
+    comp_pct = 100 if settings.account_completed else (settings.completion_percentage or compute_completion_percentage(settings, org))
+
     return {
         "organization_id": str(org.id),
         "name": org.name,
         "slug": org.slug,
         "phone": settings.phone or settings.support_phone,
+        "whatsapp_number": settings.whatsapp_number or settings.phone or settings.support_phone,
         "support_email": settings.support_email,
         "studio_tagline": settings.studio_tagline,
         "disciplines": settings.disciplines,
@@ -248,6 +277,7 @@ async def get_studio_profile(
         "zoom_host_video": settings.zoom_host_video,
         "account_completed": settings.account_completed,
         "completion_step": settings.completion_step,
+        "completion_percentage": comp_pct,
         "role": membership.role if membership else "SUPER_ADMIN"
     }
 
@@ -256,6 +286,7 @@ async def update_studio_profile(
     org_id: uuid.UUID,
     payload: StudioProfileUpdate,
     tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN, UserRole.INSTRUCTOR])),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     org, membership = tenant
@@ -271,6 +302,10 @@ async def update_studio_profile(
     if payload.phone is not None:
         settings.phone = payload.phone.strip()
         settings.support_phone = payload.phone.strip()
+        if isinstance(current_user, User) and not current_user.is_superadmin:
+            current_user.phone = payload.phone.strip()
+    if payload.whatsapp_number is not None:
+        settings.whatsapp_number = payload.whatsapp_number.strip()
     if payload.support_email is not None:
         settings.support_email = payload.support_email.strip()
     if payload.studio_tagline is not None:
@@ -325,8 +360,18 @@ async def update_studio_profile(
         settings.zoom_host_video = payload.zoom_host_video
     if payload.account_completed is not None:
         settings.account_completed = payload.account_completed
-    if payload.completion_step is not None:
+        if payload.account_completed:
+            settings.completion_step = 6
+            settings.completion_percentage = 100
+    if payload.completion_step is not None and not settings.account_completed:
         settings.completion_step = payload.completion_step
+
+    if not settings.account_completed:
+        settings.completion_percentage = (
+            payload.completion_percentage
+            if payload.completion_percentage is not None
+            else compute_completion_percentage(settings, org)
+        )
 
     await db.commit()
     await db.refresh(settings)
@@ -337,7 +382,9 @@ async def update_studio_profile(
         "message": "Studio profile updated successfully",
         "account_completed": settings.account_completed,
         "completion_step": settings.completion_step,
-        "zoom_connected": settings.zoom_connected
+        "completion_percentage": settings.completion_percentage,
+        "zoom_connected": settings.zoom_connected,
+        "whatsapp_number": settings.whatsapp_number
     }
 
 @router.post("/{org_id}/zoom/connect")

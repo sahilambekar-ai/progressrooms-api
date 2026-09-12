@@ -80,6 +80,7 @@ async def verify_otp(payload: VerifyOTPRequest, db: AsyncSession = Depends(get_d
     org_slug = None
     account_completed = False
     completion_step = 1
+    completion_percentage = 0
     zoom_connected = False
 
     mem_stmt = select(OrganizationMember, Organization).join(
@@ -99,6 +100,7 @@ async def verify_otp(payload: VerifyOTPRequest, db: AsyncSession = Depends(get_d
         if org_settings:
             account_completed = org_settings.account_completed
             completion_step = org_settings.completion_step
+            completion_percentage = org_settings.completion_percentage or 0
             zoom_connected = org_settings.zoom_connected
         else:
             new_settings = OrganizationSetting(
@@ -107,7 +109,8 @@ async def verify_otp(payload: VerifyOTPRequest, db: AsyncSession = Depends(get_d
                 support_phone=user.phone,
                 support_email=user.email,
                 account_completed=False,
-                completion_step=1
+                completion_step=1,
+                completion_percentage=0
             )
             db.add(new_settings)
             await db.commit()
@@ -128,6 +131,7 @@ async def verify_otp(payload: VerifyOTPRequest, db: AsyncSession = Depends(get_d
             "account_status": getattr(user, "account_status", "ACTIVE"),
             "account_completed": account_completed,
             "completion_step": completion_step,
+            "completion_percentage": completion_percentage,
             "zoom_connected": zoom_connected
         }
     )

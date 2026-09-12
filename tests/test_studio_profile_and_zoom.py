@@ -68,6 +68,7 @@ async def test_studio_registration_and_profile_flow(db_session):
     # 6. Update Profile with Location, GST, Bank Details
     update_payload = StudioProfileUpdate(
         phone="+91 98765 11223",
+        whatsapp_number="+91 98765 11223",
         studio_tagline="Sacred Movement & Aerial Flow",
         disciplines="Hatha, Aerial, Vinyasa, Pranayama",
         teaching_mode="HYBRID",
@@ -90,9 +91,12 @@ async def test_studio_registration_and_profile_flow(db_session):
         org_id=org.id,
         payload=update_payload,
         tenant=(org, member),
+        current_user=user,
         db=db_session
     )
     assert up_res["status"] == "success"
+    assert up_res["completion_percentage"] > 0
+    assert user.phone == "+91 98765 11223"
 
     # 7. Connect Zoom
     zoom_req = ZoomConnectRequest(
@@ -111,18 +115,20 @@ async def test_studio_registration_and_profile_flow(db_session):
     assert zoom_res["status"] == "connected"
     assert zoom_res["account_email"] == "maya.zoom@shala.org"
 
-    # 8. Mark Account as Completed
+    # 8. Mark Account as Completed (Step 6 Complete)
     complete_payload = StudioProfileUpdate(
         account_completed=True,
-        completion_step=5
+        completion_step=6
     )
     final_res = await update_studio_profile(
         org_id=org.id,
         payload=complete_payload,
         tenant=(org, member),
+        current_user=user,
         db=db_session
     )
     assert final_res["account_completed"] is True
+    assert final_res["completion_percentage"] == 100
     assert final_res["zoom_connected"] is True
 
     # 9. Verify generated Zoom meeting

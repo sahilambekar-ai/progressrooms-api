@@ -57,6 +57,7 @@ class OrganizationSetting(Base, TimestampMixin):
     
     # Studio Profile & Contact
     phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    whatsapp_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
     studio_tagline: Mapped[str | None] = mapped_column(String(255), nullable=True)
     disciplines: Mapped[str | None] = mapped_column(String(500), nullable=True) # Comma-separated or tags
 
@@ -93,5 +94,6 @@ class OrganizationSetting(Base, TimestampMixin):
     # Onboarding Status
     account_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     completion_step: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    completion_percentage: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     organization: Mapped["Organization"] = relationship(back_populates="settings")
