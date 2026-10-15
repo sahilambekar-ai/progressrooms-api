@@ -17,12 +17,20 @@ async def get_admin_metrics(
     admin: User = Depends(require_superadmin),
     db: AsyncSession = Depends(get_db)
 ):
-    orgs_count = await db.scalar(select(func.count(Organization.id)))
-    instructors_count = await db.scalar(select(func.count(OrganizationMember.id)))
-    students_count = await db.scalar(select(func.count(OrganizationStudent.id)))
-    users_count = await db.scalar(select(func.count(User.id)))
-    orders_sum = await db.scalar(select(func.sum(Order.total_amount)).where(Order.status == "PAID"))
-    subs_count = await db.scalar(select(func.count(OrganizationSubscription.id)).where(OrganizationSubscription.status == "ACTIVE"))
+    # Independent scalar subqueries avoid join fan-out and share one round trip.
+    stmt = select(
+        select(func.count(Organization.id)).scalar_subquery(),
+        select(func.count(OrganizationMember.id)).scalar_subquery(),
+        select(func.count(OrganizationStudent.id)).scalar_subquery(),
+        select(func.count(User.id)).scalar_subquery(),
+        select(func.sum(Order.total_amount)).where(Order.status == "PAID").scalar_subquery(),
+        select(func.count(OrganizationSubscription.id)).where(
+            OrganizationSubscription.status == "ACTIVE"
+        ).scalar_subquery(),
+    )
+    orgs_count, instructors_count, students_count, users_count, orders_sum, subs_count = (
+        await db.execute(stmt)
+    ).one()
 
     return {
         "total_organizations": orgs_count or 0,

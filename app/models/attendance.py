@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Text, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Text, DateTime, ForeignKey, UniqueConstraint, CheckConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base, TimestampMixin
@@ -22,4 +22,18 @@ class AttendanceRecord(Base, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("class_occurrence_id", "session_enrollment_id", name="uq_occurrence_enrollment_attendance"),
+    )
+
+
+class TeacherAttendance(Base, TimestampMixin):
+    __tablename__ = "teacher_attendance"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    class_occurrence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("class_occurrences.id", ondelete="CASCADE"), index=True)
+    teacher_member_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organization_members.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    marked_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    __table_args__ = (
+        UniqueConstraint("class_occurrence_id", "teacher_member_id", name="uq_teacher_occurrence_attendance"),
+        CheckConstraint("status IN ('PRESENT', 'ABSENT', 'CANCELLED')", name="ck_teacher_attendance_status"),
     )

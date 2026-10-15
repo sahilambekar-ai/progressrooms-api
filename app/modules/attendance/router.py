@@ -1,11 +1,11 @@
 import uuid
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
-from app.models.organization import Organization, OrganizationMember
+from app.models.organization import Organization, OrganizationMember, OrganizationStudent
+from app.modules.scheduling.access import accessible_occurrence
 from app.models.schedule import ClassOccurrence
 from app.models.commerce import SessionEnrollment
 from app.models.attendance import AttendanceRecord
@@ -13,6 +13,7 @@ from app.modules.organizations.dependencies import require_org_role
 from app.common.enums import UserRole, AttendanceStatus
 from app.models.user import User
 from app.modules.auth.dependencies import get_current_user
+from app.modules.classes.service import auto_complete_expired_one_on_one_classes
 
 router = APIRouter(prefix="/organizations/{org_id}/occurrences/{occurrence_id}", tags=["Attendance"])
 
@@ -28,35 +29,30 @@ async def get_attendance_roster(
     tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN, UserRole.INSTRUCTOR])),
     db: AsyncSession = Depends(get_db)
 ):
-    occ_stmt = select(ClassOccurrence).where(ClassOccurrence.id == occurrence_id, ClassOccurrence.organization_id == org_id)
-    occ_res = await db.execute(occ_stmt)
-    occ = occ_res.scalar_one_or_none()
-    if not occ:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class occurrence not found")
+    await auto_complete_expired_one_on_one_classes(db, org_id)
+    occ = await accessible_occurrence(db, org_id, occurrence_id, tenant[1])
 
-    # Get active enrollments for this session
-    enr_stmt = select(SessionEnrollment).options(
-        selectinload(SessionEnrollment.user),
-        selectinload(SessionEnrollment.attendance_records)
-    ).where(
-        SessionEnrollment.session_id == occ.session_id,
-        SessionEnrollment.status == "ACTIVE"
-    )
-    enr_res = await db.execute(enr_stmt)
-    enrollments = enr_res.scalars().all()
-
-    roster = []
-    for enr in enrollments:
-        att = next((a for a in enr.attendance_records if a.class_occurrence_id == occurrence_id), None)
-        roster.append({
-            "enrollment_id": str(enr.id),
-            "student_id": str(enr.user_id),
-            "student_name": enr.user.full_name,
-            "student_email": enr.user.email,
-            "attendance_status": att.status if att else "UNMARKED",
-            "sessions_attended": enr.sessions_attended,
-            "total_sessions": enr.total_sessions
-        })
+    # Fetch only this occurrence's attendance, never each student's full history.
+    rows = (await db.execute(
+        select(SessionEnrollment, User, AttendanceRecord.status)
+        .join(User, User.id == SessionEnrollment.user_id)
+        .outerjoin(AttendanceRecord, and_(
+            AttendanceRecord.session_enrollment_id == SessionEnrollment.id,
+            AttendanceRecord.class_occurrence_id == occurrence_id,
+        ))
+        .where(SessionEnrollment.organization_id == org_id,
+               SessionEnrollment.session_id == occ.session_id,
+               SessionEnrollment.status == "ACTIVE")
+    )).all()
+    roster = [{
+        "enrollment_id": str(enr.id),
+        "student_id": str(enr.user_id),
+        "student_name": user.full_name,
+        "student_email": user.email,
+        "attendance_status": attendance_status or "UNMARKED",
+        "sessions_attended": enr.sessions_attended,
+        "total_sessions": enr.total_sessions,
+    } for enr, user, attendance_status in rows]
 
     return roster
 
@@ -69,7 +65,10 @@ async def mark_attendance(
     tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN, UserRole.INSTRUCTOR])),
     db: AsyncSession = Depends(get_db)
 ):
-    enr_stmt = select(SessionEnrollment).where(SessionEnrollment.id == payload.enrollment_id)
+    occ = await accessible_occurrence(db, org_id, occurrence_id, tenant[1], lock=True)
+    enr_stmt = select(SessionEnrollment).where(SessionEnrollment.id == payload.enrollment_id,
+        SessionEnrollment.organization_id == org_id, SessionEnrollment.session_id == occ.session_id,
+        SessionEnrollment.status == "ACTIVE").with_for_update()
     enr_res = await db.execute(enr_stmt)
     enr = enr_res.scalar_one_or_none()
     if not enr:
@@ -81,6 +80,11 @@ async def mark_attendance(
     )
     att_res = await db.execute(att_stmt)
     att = att_res.scalar_one_or_none()
+
+    if payload.status == AttendanceStatus.ATTENDED and (not att or att.status != AttendanceStatus.ATTENDED.value):
+        from app.modules.commerce.service import available_credit
+        if not await available_credit(db, enr):
+            raise HTTPException(409, "No sessions remain on this class or pass")
 
     if not att:
         att = AttendanceRecord(

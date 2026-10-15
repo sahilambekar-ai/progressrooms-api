@@ -29,13 +29,22 @@ class AuthService:
         email: str,
         password: str | None = None,
         phone: str | None = None,
+        whatsapp_number: str | None = None,
         role: str = "STUDIO",
-        studio_name: str | None = None
+        studio_name: str | None = None,
+        location: str | None = None,
+        privacy_policy_version: str | None = None
     ) -> tuple[str, str, str]:
         """
         Creates a new unverified user (and studio organization if role is studio),
         generates an email verification OTP, and dispatches it via Brevo.
         """
+        if role not in {"STUDIO", "STUDENT"}:
+            raise HTTPException(400, "Only studios and students can register")
+        if not password or len(password) < 8 or not full_name.strip():
+            raise HTTPException(400, "Name and a password of at least 8 characters are required")
+        if role == "STUDENT" and (not phone or not phone.strip() or not location or not location.strip()):
+            raise HTTPException(400, "Phone and location are required")
         email_clean = email.strip().lower()
         stmt = select(User).where(User.email == email_clean)
         res = await db.execute(stmt)
@@ -44,7 +53,7 @@ class AuthService:
         if user and user.is_verified:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="An account with this email already exists and is verified. Please log in directly."
+                detail="An account with this email already exists. Sign in or request a verification code."
             )
 
         pwd_hash = get_password_hash(password) if password else None
@@ -54,8 +63,11 @@ class AuthService:
                 email=email_clean,
                 full_name=full_name.strip(),
                 phone=phone.strip() if phone else None,
+                whatsapp_number=whatsapp_number,
                 password_hash=pwd_hash,
-                is_superadmin=(email_clean == "admin@test.progressrooms.local"),
+                is_superadmin=False,
+                role=role,
+                location=location,
                 is_verified=False,
                 account_status="PENDING_VERIFICATION"
             )
@@ -63,11 +75,14 @@ class AuthService:
             await db.flush()
         else:
             user.full_name = full_name.strip()
-            if phone:
+            user.whatsapp_number = whatsapp_number
+            if phone and phone.strip():
                 user.phone = phone.strip()
             if pwd_hash:
                 user.password_hash = pwd_hash
-            user.is_verified = False
+            if location:
+                user.location = location
+            user.role = role
             user.account_status = "PENDING_VERIFICATION"
 
         if pwd_hash:
@@ -88,10 +103,10 @@ class AuthService:
                 auth_m.credential_hash = pwd_hash
 
         # Setup Studio Organization if Studio/Instructor role
-        if role.upper() in ["STUDIO", "INSTRUCTOR", "OWNER"]:
-            mem_stmt = select(OrganizationMember).where(OrganizationMember.user_id == user.id)
-            existing_mem = (await db.execute(mem_stmt)).scalar_one_or_none()
-            if not existing_mem:
+        if role == "STUDIO":
+            mem_stmt = select(OrganizationMember, Organization).join(Organization).where(OrganizationMember.user_id == user.id, OrganizationMember.is_active == True)
+            existing_mem_row = (await db.execute(mem_stmt)).first()
+            if not existing_mem_row:
                 org_display_name = (studio_name.strip() if studio_name else f"{full_name.strip()} Sanctuary")
                 base_slug = re.sub(r'[^a-z0-9]+', '-', org_display_name.lower()).strip('-') or "sanctuary"
                 slug = f"{base_slug}-{uuid.uuid4().hex[:6]}"
@@ -108,7 +123,7 @@ class AuthService:
                 new_member = OrganizationMember(
                     organization_id=new_org.id,
                     user_id=user.id,
-                    role="OWNER",
+                    role="STUDIO",
                     title="Studio Founder & Lead Guide",
                     bio="Lead instructor and sanctuary director.",
                     is_active=True
@@ -124,33 +139,19 @@ class AuthService:
                     completion_step=1
                 )
                 db.add(new_settings)
-        else:
-            # Student role: associate with primary studio
-            org_stmt = select(Organization).limit(1)
-            first_org = (await db.execute(org_stmt)).scalar_one_or_none()
-            if first_org:
-                stu_stmt = select(OrganizationStudent).where(
-                    OrganizationStudent.organization_id == first_org.id,
-                    OrganizationStudent.user_id == user.id
-                )
-                existing_stu = (await db.execute(stu_stmt)).scalar_one_or_none()
-                if not existing_stu:
-                    db.add(OrganizationStudent(
-                        organization_id=first_org.id,
-                        user_id=user.id,
-                        status="ACTIVE"
-                    ))
-
+            else:
+                existing_mem, existing_org = existing_mem_row
+                if studio_name and studio_name.strip():
+                    existing_org.name = studio_name.strip()
         # Generate Email Verification OTP
-        if email_clean.endswith(".local") or email_clean.endswith(".test"):
-            otp_code = "123456"
-        else:
-            otp_code = f"{secrets.randbelow(900000) + 100000}"
+        otp_code = f"{secrets.randbelow(900000) + 100000}"
 
         otp_hash = _hash_string(otp_code)
         now_utc = datetime.now(timezone.utc)
         expires_at = now_utc + timedelta(minutes=settings.OTP_EXPIRE_MINUTES)
 
+        from sqlalchemy import update
+        await db.execute(update(UserOtp).where(UserOtp.user_id == user.id, UserOtp.verified_at.is_(None)).values(verified_at=now_utc))
         otp_record = UserOtp(
             user_id=user.id,
             email=email_clean,
@@ -161,16 +162,16 @@ class AuthService:
             verified_at=None
         )
         db.add(otp_record)
+        if privacy_policy_version:
+            from app.models.audit import AuditLog
+            db.add(AuditLog(
+                user_id=user.id, entity_type="privacy_consent", entity_id=user.id,
+                action="PRIVACY_POLICY_ACCEPTED",
+                new_data={"policy_version": privacy_policy_version, "audience": role,
+                          "accepted": True, "source": "registration"},
+            ))
         await db.commit()
         await db.refresh(otp_record)
-
-        print("\n" + "="*60)
-        print(f"🌿  [NEW REGISTRATION OTP FOR: {email_clean}]")
-        print(f"👉  CODE: {otp_code}")
-        print(f"🎯  PURPOSE: EMAIL_VERIFICATION")
-        print(f"⏰  EXPIRES: {settings.OTP_EXPIRE_MINUTES} minutes")
-        print("="*60 + "\n")
-        logger.info(f"🌿 [Registration OTP] Email: {email_clean} | Code: {otp_code} | Record: {otp_record.id}")
 
         try:
             await send_otp_email(
@@ -197,10 +198,7 @@ class AuthService:
         """
         email_clean = email.strip().lower()
 
-        if email_clean.endswith(".local") or email_clean.endswith(".test"):
-            otp_code = "123456"
-        else:
-            otp_code = f"{secrets.randbelow(900000) + 100000}"
+        otp_code = f"{secrets.randbelow(900000) + 100000}"
 
         otp_hash = _hash_string(otp_code)
         now_utc = datetime.now(timezone.utc)
@@ -214,19 +212,7 @@ class AuthService:
         requires_activation = False
 
         if not user:
-            # User does not exist, create unverified
-            user = User(
-                email=email_clean,
-                full_name=email_clean.split("@")[0].replace(".", " ").title(),
-                is_superadmin=(email_clean == "admin@test.progressrooms.local"),
-                is_verified=False,
-                account_status="PENDING_VERIFICATION"
-            )
-            db.add(user)
-            await db.flush()
-            is_verified = False
-            requires_activation = True
-            msg = f"Your account is not verified yet. An activation OTP has been dispatched to {email_clean} to activate your account."
+            raise HTTPException(404, "Account not found. Please register first.")
         elif not getattr(user, "is_verified", False) or user.account_status == "PENDING_VERIFICATION":
             is_verified = False
             requires_activation = True
@@ -236,6 +222,8 @@ class AuthService:
             requires_activation = False
             msg = f"Login OTP successfully sent to {email_clean}."
 
+        from sqlalchemy import update
+        await db.execute(update(UserOtp).where(UserOtp.user_id == user.id, UserOtp.verified_at.is_(None)).values(verified_at=now_utc))
         otp_record = UserOtp(
             user_id=user.id,
             email=email_clean,
@@ -247,35 +235,9 @@ class AuthService:
         )
         db.add(otp_record)
 
-        auth_stmt = select(UserAuthMethod).where(
-            UserAuthMethod.user_id == user.id,
-            UserAuthMethod.auth_type == "OTP"
-        )
-        auth_res = await db.execute(auth_stmt)
-        auth_method = auth_res.scalar_one_or_none()
-
-        if not auth_method:
-            auth_method = UserAuthMethod(
-                user_id=user.id,
-                auth_type="OTP",
-                otp_code=otp_code,
-                otp_expires_at=expires_at
-            )
-            db.add(auth_method)
-        else:
-            auth_method.otp_code = otp_code
-            auth_method.otp_expires_at = expires_at
-
+        # user_otps is the verification source; do not mirror plaintext codes.
         await db.commit()
         await db.refresh(otp_record)
-
-        print("\n" + "="*60)
-        print(f"📨  [{'ACTIVATION' if requires_activation else 'LOGIN'} OTP FOR: {email_clean}]")
-        print(f"👉  CODE: {otp_code}")
-        print(f"🎯  PURPOSE: {purpose}")
-        print(f"⏰  EXPIRES: {settings.OTP_EXPIRE_MINUTES} minutes")
-        print("="*60 + "\n")
-        logger.info(f"📨 [OTP Generated] Email: {email_clean} | Code: {otp_code} | Needs Activation: {requires_activation}")
 
         try:
             await send_otp_email(
@@ -331,23 +293,7 @@ class AuthService:
         now = datetime.now(timezone.utc)
 
         if not otp_record:
-            auth_stmt = select(UserAuthMethod).where(
-                UserAuthMethod.user_id == user.id,
-                UserAuthMethod.auth_type == "OTP"
-            )
-            auth_res = await db.execute(auth_stmt)
-            auth_method = auth_res.scalar_one_or_none()
-            if not auth_method or auth_method.otp_code != code_clean:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="No active verification code found. Please request a new one."
-                )
-            auth_expires = ensure_utc(auth_method.otp_expires_at)
-            if auth_expires and now > auth_expires:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Verification passcode has expired. Please request a new one."
-                )
+            raise HTTPException(400, "No active verification code. Request a new code.")
         else:
             expires_at = ensure_utc(otp_record.expires_at)
             if expires_at and now > expires_at:
@@ -363,8 +309,7 @@ class AuthService:
                 )
 
             expected_hash = _hash_string(code_clean)
-            is_test_account = email_clean.endswith(".local") or email_clean.endswith(".test")
-            is_match = (otp_record.otp_hash == expected_hash) or (is_test_account and code_clean == "123456")
+            is_match = secrets.compare_digest(otp_record.otp_hash, expected_hash)
 
             if not is_match:
                 otp_record.attempts += 1
@@ -376,6 +321,9 @@ class AuthService:
                 )
 
             otp_record.verified_at = now
+
+        if not user.is_active or user.deleted_at or user.account_status in {"SUSPENDED", "DISABLED"}:
+            raise HTTPException(403, "Account access is disabled")
 
         # Activate user account
         user.is_verified = True
@@ -399,7 +347,7 @@ class AuthService:
         token = create_access_token({
             "sub": str(user.id),
             "email": user.email,
-            "is_superadmin": user.is_superadmin
+            "is_superadmin": user.is_superadmin, "role": user.role
         })
 
         logger.info(f"✅ [Account Verified & Logged In] User: {user.email} (Status: {user.account_status})")
@@ -437,11 +385,6 @@ class AuthService:
             auth_m = auth_res.scalar_one_or_none()
             if auth_m and auth_m.credential_hash:
                 is_valid = verify_password(password, auth_m.credential_hash)
-            elif password in ["admin123", "password123", "student123"] or email_clean.endswith((".test", ".local")):
-                # Dev account bootstrap
-                is_valid = True
-                user.password_hash = get_password_hash(password)
-                await db.commit()
 
         if not is_valid:
             raise HTTPException(
@@ -449,7 +392,7 @@ class AuthService:
                 detail="Invalid email or password."
             )
 
-        if user.account_status in ["SUSPENDED", "DISABLED"]:
+        if not user.is_active or user.deleted_at or user.account_status in ["SUSPENDED", "DISABLED"]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Account is {user.account_status}. Please contact support."
@@ -462,7 +405,7 @@ class AuthService:
                 email=user.email,
                 purpose="LOGIN_VERIFICATION"
             )
-            is_dev = email_clean.endswith((".test", ".local")) or settings.ENVIRONMENT == "development"
+            is_dev = settings.AUTH_SHOW_OTP_PREVIEW
             return {
                 "access_token": None,
                 "token_type": "bearer",
@@ -478,7 +421,7 @@ class AuthService:
         await db.commit()
         await db.refresh(user)
 
-        user_role = "SUPER_ADMIN" if user.is_superadmin else "STUDENT"
+        user_role = user.role
         org_id = None
         org_name = None
         org_slug = None
@@ -486,15 +429,19 @@ class AuthService:
         completion_step = 1
         completion_percentage = 0
         zoom_connected = False
+        teacher_code = None
 
         mem_stmt = select(OrganizationMember, Organization).join(
             Organization, Organization.id == OrganizationMember.organization_id
-        ).where(OrganizationMember.user_id == user.id)
+        ).where(OrganizationMember.user_id == user.id, OrganizationMember.is_active == True)
         mem_res = await db.execute(mem_stmt)
         mem_row = mem_res.first()
+        if user.role == "TEACHER" and not mem_row:
+            raise HTTPException(403, "Teacher access has been deactivated")
         if mem_row:
             member, org = mem_row
-            user_role = member.role
+            teacher_code = member.teacher_code if user.role == "TEACHER" else None
+            user_role = user.role
             org_id = str(org.id)
             org_name = org.name
             org_slug = org.slug
@@ -523,7 +470,7 @@ class AuthService:
             "sub": str(user.id),
             "email": user.email,
             "role": user_role,
-            "is_superadmin": user.is_superadmin
+            "is_superadmin": user.is_superadmin, "role": user.role
         })
 
         return {
@@ -546,6 +493,114 @@ class AuthService:
                 "account_completed": account_completed,
                 "completion_step": completion_step,
                 "completion_percentage": completion_percentage,
-                "zoom_connected": zoom_connected
+                "zoom_connected": zoom_connected,
+                "teacher_code": teacher_code,
             }
         }
+
+    @staticmethod
+    async def forgot_password(db: AsyncSession, email: str) -> tuple[str, str, str]:
+        email_clean = email.strip().lower()
+        stmt = select(User).where(User.email == email_clean)
+        res = await db.execute(stmt)
+        user = res.scalar_one_or_none()
+
+        if not user:
+            return "", "", "If an account exists with this email, a password reset passcode has been sent."
+
+        otp_code = f"{secrets.randbelow(900000) + 100000}"
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(minutes=10)
+
+        otp_record = UserOtp(
+            user_id=user.id,
+            email=email_clean,
+            otp_hash=_hash_string(otp_code),
+            purpose="PASSWORD_RESET",
+            expires_at=expires_at,
+            attempts=0
+        )
+        db.add(otp_record)
+        await db.commit()
+        await db.refresh(otp_record)
+
+        try:
+            await send_otp_email(
+                to_email=email_clean,
+                to_name=user.full_name or email_clean,
+                otp_code=otp_code,
+                purpose="PASSWORD_RESET"
+            )
+        except Exception as e:
+            logger.error(f"[Brevo Send Error] {str(e)}")
+
+        return otp_code, str(otp_record.id), "Password reset passcode sent to your email."
+
+    @staticmethod
+    async def reset_password(db: AsyncSession, email: str, otp_code: str, new_password: str) -> str:
+        email_clean = email.strip().lower()
+        code_clean = otp_code.strip()
+
+        if len(new_password) < 6:
+            raise HTTPException(422, "Password must be at least 6 characters.")
+
+        stmt = select(User).where(User.email == email_clean)
+        res = await db.execute(stmt)
+        user = res.scalar_one_or_none()
+        if not user:
+            raise HTTPException(400, "Invalid email or verification code.")
+
+        otp_stmt = (
+            select(UserOtp)
+            .where(
+                UserOtp.user_id == user.id,
+                UserOtp.purpose == "PASSWORD_RESET",
+                UserOtp.verified_at.is_(None)
+            )
+            .order_by(UserOtp.created_at.desc())
+            .limit(1)
+        )
+        otp_record = (await db.execute(otp_stmt)).scalars().first()
+        if not otp_record:
+            raise HTTPException(400, "No active password reset request. Please request a new code.")
+
+        now = datetime.now(timezone.utc)
+        expires_at = ensure_utc(otp_record.expires_at)
+        if expires_at and now > expires_at:
+            raise HTTPException(400, "Password reset code has expired. Please request a new one.")
+
+        if otp_record.attempts >= 5:
+            raise HTTPException(429, "Too many failed attempts. Please request a new code.")
+
+        expected_hash = _hash_string(code_clean)
+        if not secrets.compare_digest(otp_record.otp_hash, expected_hash):
+            otp_record.attempts += 1
+            await db.commit()
+            remaining = max(0, 5 - otp_record.attempts)
+            raise HTTPException(400, f"Invalid verification code. {remaining} attempt(s) remaining.")
+
+        otp_record.verified_at = now
+
+        new_hash = get_password_hash(new_password)
+        user.password_hash = new_hash
+
+        auth_stmt = select(UserAuthMethod).where(
+            UserAuthMethod.user_id == user.id,
+            UserAuthMethod.auth_type == "PASSWORD"
+        )
+        auth_m = (await db.execute(auth_stmt)).scalar_one_or_none()
+        if auth_m:
+            auth_m.credential_hash = new_hash
+        else:
+            auth_m = UserAuthMethod(
+                user_id=user.id,
+                auth_type="PASSWORD",
+                credential_hash=new_hash
+            )
+            db.add(auth_m)
+
+        user.is_verified = True
+        user.account_status = "ACTIVE"
+        await db.commit()
+
+        return "Password has been reset successfully. You can now log in."

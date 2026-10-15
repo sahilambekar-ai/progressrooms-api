@@ -21,20 +21,6 @@ async def get_current_user(
         )
 
     token_str = credentials.credentials
-    if token_str.startswith("dev_test_token_"):
-        # Resolve dev test token to real DB user
-        if "superadmin" in token_str:
-            stmt = select(User).where(User.is_superadmin == True)
-        elif "instructor" in token_str or "owner" in token_str or "studio" in token_str:
-            stmt = select(User).where(User.email == "owner@yogastudio.test")
-        else:
-            stmt = select(User).where(User.email.like("student%"))
-        
-        res = await db.execute(stmt)
-        dev_user = res.scalars().first()
-        if dev_user:
-            return dev_user
-
     payload = decode_access_token(token_str)
     if not payload:
         raise HTTPException(
@@ -47,13 +33,24 @@ async def get_current_user(
     if not user_id_str:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
 
-    stmt = select(User).where(User.id == uuid.UUID(user_id_str), User.is_active == True)
+    try:
+        user_id = uuid.UUID(user_id_str)
+    except (ValueError, TypeError):
+        raise HTTPException(401, "Invalid token payload")
+    stmt = select(User).where(User.id == user_id, User.is_active == True)
     res = await db.execute(stmt)
     user = res.scalar_one_or_none()
 
-    if not user:
+    if not user or user.deleted_at or user.account_status != "ACTIVE" or not user.is_verified:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
 
+    if user.role == "TEACHER":
+        from app.models.organization import OrganizationMember
+        active = await db.scalar(select(OrganizationMember.id).where(
+            OrganizationMember.user_id == user.id, OrganizationMember.is_active == True,
+            OrganizationMember.role == "TEACHER"))
+        if not active:
+            raise HTTPException(403, "Teacher access has been deactivated")
     return user
 
 async def get_current_user_optional(
@@ -68,6 +65,6 @@ async def get_current_user_optional(
         return None
 
 async def require_superadmin(current_user: User = Depends(get_current_user)) -> User:
-    if not current_user.is_superadmin:
+    if current_user.role != "SUPER_ADMIN":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin access required")
     return current_user

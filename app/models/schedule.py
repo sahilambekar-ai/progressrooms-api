@@ -1,5 +1,5 @@
 import uuid
-from datetime import time, date, datetime
+from datetime import time, date, datetime, timezone
 from sqlalchemy import String, Boolean, Text, Integer, Time, Date, DateTime, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -34,6 +34,9 @@ class ClassOccurrence(Base, TimestampMixin):
     actual_end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(50), default=OccurrenceStatus.SCHEDULED.value, index=True, nullable=False)
     meeting_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    host_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    meeting_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    provider_meeting_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     session: Mapped["Session"] = relationship(back_populates="occurrences")
@@ -43,9 +46,10 @@ class ClassOccurrence(Base, TimestampMixin):
 
     __table_args__ = (
         Index("ix_class_occurrences_org_time", "organization_id", "actual_start_at"),
+        Index("ix_class_occurrences_session_scheduled", "session_id", "scheduled_start_at"),
     )
 
-class ClassOccurrenceChange(Base, TimestampMixin):
+class ClassOccurrenceChange(Base):
     __tablename__ = "class_occurrence_changes"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -55,5 +59,10 @@ class ClassOccurrenceChange(Base, TimestampMixin):
     previous_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     new_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
 
     occurrence: Mapped["ClassOccurrence"] = relationship(back_populates="changes")

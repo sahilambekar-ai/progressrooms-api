@@ -9,11 +9,15 @@ from app.modules.classes.router import router as class_router
 from app.modules.scheduling.router import router as schedule_router
 from app.modules.commerce.router import router as commerce_router
 from app.modules.attendance.router import router as attendance_router
+from app.modules.attendance.calendar import router as attendance_calendar_router
 from app.modules.websites.router import router as website_router
 from app.modules.student.router import router as student_router
 from app.modules.students.router import router as students_directory_router
 from app.modules.teachers.router import router as teachers_router
 from app.modules.admin.router import router as admin_router
+from app.modules.membership_tiers.router import router as membership_tiers_router
+from app.modules.billing.router import router as billing_router
+from app.modules.support.router import router as support_router
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -38,14 +42,18 @@ api_v1.include_router(auth_router)
 api_v1.include_router(org_router)
 api_v1.include_router(plan_router)
 api_v1.include_router(class_router)
+api_v1.include_router(membership_tiers_router)
+api_v1.include_router(billing_router)
 api_v1.include_router(schedule_router)
 api_v1.include_router(commerce_router)
 api_v1.include_router(attendance_router)
+api_v1.include_router(attendance_calendar_router)
 api_v1.include_router(website_router)
 api_v1.include_router(student_router)
 api_v1.include_router(students_directory_router)
 api_v1.include_router(teachers_router)
 api_v1.include_router(admin_router)
+api_v1.include_router(support_router)
 
 app.mount(settings.API_V1_STR, api_v1)
 

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, CheckConstraint, Index, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base, TimestampMixin, SoftDeleteMixin
@@ -9,8 +9,20 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="STUDENT", server_default="STUDENT", index=True)
+    username: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    address: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    __table_args__ = (
+        CheckConstraint("role IN ('SUPER_ADMIN', 'STUDIO', 'TEACHER', 'STUDENT')", name="ck_users_role"),
+        CheckConstraint("is_superadmin = (role = 'SUPER_ADMIN')", name="ck_users_superadmin_consistent"),
+        Index("uq_users_single_super_admin", "role", unique=True,
+              postgresql_where=text("role = 'SUPER_ADMIN'"), sqlite_where=text("role = 'SUPER_ADMIN'")),
+    )
+
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    whatsapp_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     avatar_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

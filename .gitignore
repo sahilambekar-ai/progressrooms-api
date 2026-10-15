@@ -30,3 +30,9 @@ ENV/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Uploaded website images (use a persistent volume in production)
+uploads/
+
+# Private previews and immutable published site versions
+generated-websites/

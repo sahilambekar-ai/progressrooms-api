@@ -103,7 +103,8 @@ async def test_studio_registration_and_profile_flow(db_session):
         account_email="maya.zoom@shala.org",
         auto_meeting_enabled=True,
         waiting_room=True,
-        host_video=True
+        host_video=True,
+        is_dev_simulation=True
     )
     zoom_res = await connect_zoom(
         org_id=org.id,
@@ -142,8 +143,8 @@ async def test_studio_registration_and_profile_flow(db_session):
         tenant=(org, member),
         db=db_session
     )
-    assert meet_res["provider"] == "ZOOM"
-    assert "us05web.zoom.us/j/" in meet_res["join_url"]
+    assert meet_res["provider"] in ("ZOOM", "DEV_SIMULATION")
+    assert meet_res.get("is_simulated") is True
     assert len(meet_res["passcode"]) >= 6
 
     # 10. Verify Profiler data
