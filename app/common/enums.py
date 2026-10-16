@@ -2,9 +2,11 @@ from enum import Enum
 
 class UserRole(str, Enum):
     SUPER_ADMIN = "SUPER_ADMIN"
-    OWNER = "OWNER"
-    ADMIN = "ADMIN"
-    INSTRUCTOR = "INSTRUCTOR"
+    STUDIO = "STUDIO"
+    TEACHER = "TEACHER"
+    OWNER = "STUDIO"
+    ADMIN = "STUDIO"
+    INSTRUCTOR = "TEACHER"
     STUDENT = "STUDENT"
 
 class OrgStatus(str, Enum):
@@ -63,6 +65,7 @@ class PaymentStatus(str, Enum):
 
 class EnrollmentStatus(str, Enum):
     ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
     EXPIRED = "EXPIRED"
     CANCELLED = "CANCELLED"
 

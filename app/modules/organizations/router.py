@@ -15,6 +15,7 @@ from app.models.user import User
 from app.modules.auth.dependencies import get_current_user
 from app.modules.organizations.dependencies import get_current_tenant_member, require_org_role
 from app.common.enums import UserRole
+from app.modules.organizations.zoom_service import ZoomService, ZoomAuthError
 
 router = APIRouter(prefix="/organizations", tags=["Organizations"])
 
@@ -78,6 +79,7 @@ class ZoomConnectRequest(BaseModel):
     auto_meeting_enabled: bool = True
     waiting_room: bool = True
     host_video: bool = True
+    is_dev_simulation: bool = False
 
 class ZoomMeetingGenerateRequest(BaseModel):
     topic: str
@@ -124,6 +126,8 @@ async def create_organization(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    if current_user.role != "SUPER_ADMIN":
+        raise HTTPException(403, "Studios are created through studio registration")
     # Check slug
     existing = await db.execute(select(Organization).where(Organization.slug == payload.slug))
     if existing.scalar_one_or_none():
@@ -166,13 +170,12 @@ async def create_organization(
 @router.get("/{org_id}")
 async def get_organization(
     org_id: uuid.UUID,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(get_current_tenant_member),
+    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.STUDIO])),
     db: AsyncSession = Depends(get_db)
 ):
     org, membership = tenant
     stmt = select(Organization).options(
-        selectinload(Organization.subscription),
-        selectinload(Organization.settings)
+        selectinload(Organization.subscription)
     ).where(Organization.id == org_id)
     res = await db.execute(stmt)
     full_org = res.scalar_one()
@@ -196,7 +199,7 @@ async def get_organization(
 @router.get("/{org_id}/members")
 async def list_members(
     org_id: uuid.UUID,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(get_current_tenant_member),
+    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.STUDIO])),
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(OrganizationMember).options(selectinload(OrganizationMember.user)).where(
@@ -221,7 +224,7 @@ async def list_members(
 @router.get("/{org_id}/profile")
 async def get_studio_profile(
     org_id: uuid.UUID,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(get_current_tenant_member),
+    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.STUDIO])),
     db: AsyncSession = Depends(get_db)
 ):
     org, membership = tenant
@@ -285,7 +288,7 @@ async def get_studio_profile(
 async def update_studio_profile(
     org_id: uuid.UUID,
     payload: StudioProfileUpdate,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN, UserRole.INSTRUCTOR])),
+    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.STUDIO])),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -391,7 +394,7 @@ async def update_studio_profile(
 async def connect_zoom(
     org_id: uuid.UUID,
     payload: ZoomConnectRequest,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN, UserRole.INSTRUCTOR])),
+    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.STUDIO])),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -405,12 +408,40 @@ async def connect_zoom(
     res = await db.execute(stmt)
     integration = res.scalar_one_or_none()
 
-    cred_payload = {
-        "email": account_email,
-        "account_id": payload.account_id or f"act_zoom_{uuid.uuid4().hex[:8]}",
-        "connected_at": datetime.now(timezone.utc).isoformat(),
-        "mode": "SERVER_TO_SERVER_OAUTH" if payload.client_id else "OAUTH_CONNECTED"
-    }
+    if payload.is_dev_simulation:
+        cred_payload = {
+            "email": account_email,
+            "account_id": payload.account_id or f"sim_acc_{uuid.uuid4().hex[:8]}",
+            "connected_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "DEV_SIMULATION",
+            "is_simulated": True,
+            "note": "Simulated local connection for development. Real Zoom API calls are bypassed."
+        }
+    else:
+        # Real provider connection requires Account ID, Client ID, and Client Secret
+        if not (payload.account_id and payload.client_id and payload.client_secret):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Real Zoom connection requires Account ID, Client ID, and Client Secret from your Zoom Server-to-Server OAuth app. In development, you may enable simulation mode to test without credentials."
+            )
+        try:
+            token_data = await ZoomService.verify_and_obtain_token(
+                account_id=payload.account_id.strip(),
+                client_id=payload.client_id.strip(),
+                client_secret=payload.client_secret.strip()
+            )
+        except ZoomAuthError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+        cred_payload = {
+            "email": account_email,
+            "account_id": payload.account_id.strip(),
+            "client_id": payload.client_id.strip(),
+            "client_secret": payload.client_secret.strip(),
+            "connected_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "SERVER_TO_SERVER_OAUTH",
+            "is_simulated": False
+        }
 
     if not integration:
         integration = OrganizationIntegration(
@@ -438,18 +469,26 @@ async def connect_zoom(
 
     await db.commit()
 
+    provider_label = "DEV_SIMULATION" if payload.is_dev_simulation else "ZOOM"
+    msg = (
+        f"[DEV_SIMULATION] Simulated Zoom provider connected for local testing ({account_email}). Real Zoom calls are bypassed."
+        if payload.is_dev_simulation
+        else f"Zoom account ({account_email}) successfully authenticated with provider."
+    )
+
     return {
         "status": "connected",
-        "provider": "ZOOM",
+        "provider": provider_label,
+        "is_simulated": payload.is_dev_simulation,
         "account_email": account_email,
         "auto_meeting_enabled": settings.zoom_auto_meeting_enabled,
-        "message": f"Zoom account ({account_email}) successfully authenticated."
+        "message": msg
     }
 
 @router.post("/{org_id}/zoom/disconnect")
 async def disconnect_zoom(
     org_id: uuid.UUID,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN, UserRole.INSTRUCTOR])),
+    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.STUDIO])),
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(OrganizationIntegration).where(
@@ -473,31 +512,188 @@ async def disconnect_zoom(
 async def generate_zoom_meeting(
     org_id: uuid.UUID,
     payload: ZoomMeetingGenerateRequest,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(get_current_tenant_member),
+    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.STUDIO])),
     db: AsyncSession = Depends(get_db)
 ):
     org, _ = tenant
     set_stmt = select(OrganizationSetting).where(OrganizationSetting.organization_id == org_id)
     settings = (await db.execute(set_stmt)).scalar_one_or_none()
 
-    num1 = random.randint(800, 899)
-    num2 = random.randint(1000, 9999)
-    num3 = random.randint(1000, 9999)
-    meeting_id = f"{num1}{num2}{num3}"
-    passcode = secrets.token_urlsafe(6)
-    join_url = f"https://us05web.zoom.us/j/{meeting_id}?pwd={passcode}"
-    start_url = f"https://us05web.zoom.us/s/{meeting_id}?zak=mock_zak_{secrets.token_hex(8)}"
+    if not settings or not settings.zoom_connected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Zoom is Not Connected. You must connect Zoom before generating test meetings."
+        )
+
+    stmt = select(OrganizationIntegration).where(
+        OrganizationIntegration.organization_id == org_id,
+        OrganizationIntegration.provider == "ZOOM",
+        OrganizationIntegration.is_active.is_(True)
+    )
+    integration = (await db.execute(stmt)).scalar_one_or_none()
+    if not integration or not integration.credentials_enc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Zoom credentials not found. Please reconnect Zoom."
+        )
+
+    try:
+        cred_data = json.loads(integration.credentials_enc)
+    except Exception:
+        cred_data = {}
+
+    is_simulated = cred_data.get("is_simulated", False) or cred_data.get("mode") == "DEV_SIMULATION"
+
+    if is_simulated:
+        sim_id = f"sim_{secrets.randbelow(900_000_000) + 100_000_000}"
+        passcode = secrets.token_urlsafe(6)
+        join_url = f"https://dev-simulation.zoom.us/j/{sim_id}?pwd={passcode}"
+        start_url = f"https://dev-simulation.zoom.us/s/{sim_id}?zak=sim_zak_{secrets.token_hex(8)}"
+
+        return {
+            "provider": "DEV_SIMULATION",
+            "is_simulated": True,
+            "meeting_id": sim_id,
+            "passcode": passcode,
+            "join_url": join_url,
+            "start_url": start_url,
+            "topic": payload.topic,
+            "timezone": payload.timezone or org.timezone,
+            "duration_minutes": payload.duration_minutes,
+            "waiting_room": settings.zoom_waiting_room if settings else True,
+            "host_video": settings.zoom_host_video if settings else True,
+            "message": "[DEV_SIMULATION] Sample meeting generated for local development."
+        }
+
+    # Real Zoom Meeting Generation
+    account_id = cred_data.get("account_id")
+    client_id = cred_data.get("client_id")
+    client_secret = cred_data.get("client_secret")
+
+    if not (account_id and client_id and client_secret):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Incomplete Zoom credentials: Account ID, Client ID, and Client Secret are required."
+        )
+
+    try:
+        token_info = await ZoomService.verify_and_obtain_token(account_id, client_id, client_secret)
+        meeting = await ZoomService.create_meeting(
+            access_token=token_info["access_token"],
+            topic=payload.topic,
+            start_time=datetime.now(timezone.utc),
+            duration_minutes=payload.duration_minutes,
+            timezone_str=payload.timezone or org.timezone,
+            waiting_room=settings.zoom_waiting_room if settings else True,
+            host_video=settings.zoom_host_video if settings else True,
+            host_email=settings.zoom_account_email or "me"
+        )
+    except ZoomAuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
     return {
         "provider": "ZOOM",
-        "meeting_id": meeting_id,
-        "passcode": passcode,
-        "join_url": join_url,
-        "start_url": start_url,
+        "is_simulated": False,
+        "meeting_id": meeting["meeting_id"],
+        "passcode": meeting["passcode"],
+        "join_url": meeting["join_url"],
+        "start_url": meeting["start_url"],
         "topic": payload.topic,
         "timezone": payload.timezone or org.timezone,
         "duration_minutes": payload.duration_minutes,
         "waiting_room": settings.zoom_waiting_room if settings else True,
-        "host_video": settings.zoom_host_video if settings else True
+        "host_video": settings.zoom_host_video if settings else True,
+        "message": "Live Zoom meeting room provisioned successfully."
+    }
+
+
+@router.get("/{org_id}/analytics")
+async def get_studio_analytics(
+    org_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    tenant=Depends(require_org_role([UserRole.STUDIO])),
+    db: AsyncSession = Depends(get_db)
+):
+    from sqlalchemy import func
+    from app.models.commerce import SessionEnrollment, Order, Payment
+    from app.models.session import Session, SessionPricing
+    from app.models.support import SupportTicket
+    from app.models.membership_tier import MembershipTier
+
+    # 1. Active enrolled students: DISTINCT user_id with an ACTIVE SessionEnrollment in this studio
+    active_students_count = await db.scalar(
+        select(func.count(func.distinct(SessionEnrollment.user_id)))
+        .where(
+            SessionEnrollment.organization_id == org_id,
+            SessionEnrollment.status == "ACTIVE"
+        )
+    ) or 0
+
+    # 2. Active recurring batches: configured active sessions in this studio
+    active_batches_count = await db.scalar(
+        select(func.count(Session.id))
+        .where(
+            Session.organization_id == org_id,
+            Session.is_active == True,
+            Session.deleted_at.is_(None)
+        )
+    ) or 0
+
+    # 3. Total support tickets in this studio
+    support_tickets_count = await db.scalar(
+        select(func.count(SupportTicket.id))
+        .where(SupportTicket.organization_id == org_id)
+    ) or 0
+
+    # 4. Projected subscription value from active class batches and passes
+    classes_pricing_sum = await db.scalar(
+        select(func.sum(SessionPricing.price))
+        .join(Session, Session.id == SessionPricing.session_id)
+        .where(
+            Session.organization_id == org_id,
+            Session.is_active == True,
+            Session.deleted_at.is_(None)
+        )
+    ) or 0
+
+    passes_pricing_sum = await db.scalar(
+        select(func.sum(MembershipTier.price))
+        .where(
+            MembershipTier.organization_id == org_id,
+            MembershipTier.is_active == True,
+            MembershipTier.deleted_at.is_(None)
+        )
+    ) or 0
+
+    projected_subscription_value = float(classes_pricing_sum or 0) + float(passes_pricing_sum or 0)
+
+    # 5. Collected gateway revenue (Payment.status in ('SUCCESS', 'CAPTURED'))
+    collected_revenue = await db.scalar(
+        select(func.sum(Payment.amount))
+        .join(Order, Payment.order_id == Order.id)
+        .where(
+            Order.organization_id == org_id,
+            Payment.status.in_(["SUCCESS", "CAPTURED"])
+        )
+    ) or 0
+
+    # 6. Billed revenue: sum of billing_value across active enrollments
+    billed_revenue = await db.scalar(
+        select(func.sum(SessionEnrollment.billing_value))
+        .where(
+            SessionEnrollment.organization_id == org_id,
+            SessionEnrollment.status == "ACTIVE"
+        )
+    ) or 0
+
+    return {
+        "active_enrolled_students": active_students_count,
+        "active_recurring_batches": active_batches_count,
+        "total_support_queries": support_tickets_count,
+        "projected_subscription_value": projected_subscription_value,
+        "collected_revenue": float(collected_revenue),
+        "billed_revenue": float(billed_revenue),
+        "currency": tenant[0].currency or "INR",
+        "explanation": "Billed revenue reflects total scheduled subscription value across student enrollments. Collected revenue reflects actual gateway payment receipts."
     }
 

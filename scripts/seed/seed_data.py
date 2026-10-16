@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, date, time, timedelta, timezone
 from sqlalchemy import select
 from app.core.database import AsyncSessionLocal, engine, Base
-from app.models.user import User, UserAuthMethod
+from app.models.user import User
 from app.models.organization import Organization, OrganizationMember, OrganizationSetting, OrganizationStudent
 from app.models.plan import Plan, PlanFeature, OrganizationSubscription
 from app.models.session import ClassType, Session, SessionInstructor, SessionPricing, SessionRequirement
@@ -26,17 +26,11 @@ async def seed_database():
         admin_user = User(
             email="admin@test.progressrooms.local",
             full_name="Platform Super Admin",
-            is_superadmin=True
+            is_superadmin=True, role="SUPER_ADMIN"
         )
         db.add(admin_user)
         await db.flush()
 
-        db.add(UserAuthMethod(
-            user_id=admin_user.id,
-            auth_type="OTP",
-            otp_code="123456",
-            otp_expires_at=datetime.now(timezone.utc) + timedelta(days=365)
-        ))
 
         # 2. Website Templates
         tmpl_default = WebsiteTemplate(name="Default Classic", code="DEFAULT")
@@ -78,24 +72,22 @@ async def seed_database():
         db.add_all(features)
         await db.flush()
 
-        # 4. Organization A: Sahil Yoga Studio
-        org_a = Organization(name="Sahil Yoga Studio", slug="sahil-yoga-studio", timezone="Asia/Kolkata", currency="INR")
+        # 4. Organization A: neutral development studio
+        org_a = Organization(name="Demo Yoga Studio", slug="demo-yoga-studio", timezone="Asia/Kolkata", currency="INR")
         db.add(org_a)
         await db.flush()
 
         # Owner & Instructors
-        sahil_user = User(email="owner@yogastudio.test", full_name="Sahil Sharma")
-        ananya_user = User(email="ananya@yogastudio.test", full_name="Ananya Sen")
-        rohit_user = User(email="rohit@yogastudio.test", full_name="Rohit Verma")
+        sahil_user = User(role="STUDIO", email="owner@yogastudio.test", full_name="Demo Studio Owner")
+        ananya_user = User(role="TEACHER", email="ananya@yogastudio.test", full_name="Ananya Sen")
+        rohit_user = User(role="TEACHER", email="rohit@yogastudio.test", full_name="Rohit Verma")
         db.add_all([sahil_user, ananya_user, rohit_user])
         await db.flush()
 
-        for u in [sahil_user, ananya_user, rohit_user]:
-            db.add(UserAuthMethod(user_id=u.id, auth_type="OTP", otp_code="123456", otp_expires_at=datetime.now(timezone.utc) + timedelta(days=365)))
 
         mem_owner = OrganizationMember(organization_id=org_a.id, user_id=sahil_user.id, role=UserRole.OWNER.value, title="Founder & Lead Guru", bio="Certified Hatha & Vinyasa master with 12+ years experience.")
-        mem_ananya = OrganizationMember(organization_id=org_a.id, user_id=ananya_user.id, role=UserRole.INSTRUCTOR.value, title="Aerial Yoga Specialist", bio="Aerial silks and restorative yoga practitioner.")
-        mem_rohit = OrganizationMember(organization_id=org_a.id, user_id=rohit_user.id, role=UserRole.INSTRUCTOR.value, title="Pranayama & Meditation Coach", bio="Mindfulness and breathwork guide.")
+        mem_ananya = OrganizationMember(organization_id=org_a.id, user_id=ananya_user.id, role=UserRole.INSTRUCTOR.value, teacher_code="11000001", title="Aerial Yoga Specialist", bio="Aerial silks and restorative yoga practitioner.")
+        mem_rohit = OrganizationMember(organization_id=org_a.id, user_id=rohit_user.id, role=UserRole.INSTRUCTOR.value, teacher_code="11000002", title="Pranayama & Meditation Coach", bio="Mindfulness and breathwork guide.")
         db.add_all([mem_owner, mem_ananya, mem_rohit])
 
         # Trial Subscription for Org A
@@ -117,7 +109,7 @@ async def seed_database():
             template_id=tmpl_default.id,
             headline="Cultivate Stillness, Strength & Breath",
             subheadline="Authentic daily Hatha flow, Aerial conditioning, and Himalayan breathwork classes in Bangalore & Online.",
-            about_text="Sahil Yoga Studio is a holistic wellness sanctuary dedicated to alignment, breath awareness, and graceful mobility. Whether you are unrolling a mat for the first time or soaring in silks, welcome home.",
+            about_text="Demo Yoga Studio is a holistic wellness sanctuary dedicated to alignment, breath awareness, and graceful mobility. Whether you are unrolling a mat for the first time or soaring in silks, welcome home.",
             primary_color="#4f46e5",
             accent_color="#06b6d4"
         )
@@ -225,12 +217,21 @@ async def seed_database():
 
         # 5. Students & Enrollments
         students = []
+        student_states = ["ACTIVE"] * 14 + ["INACTIVE"] * 3 + ["SUSPENDED"] * 3
         for i in range(1, 21):
-            s_user = User(email=f"student{i}@test.progressrooms.local", full_name=f"Student {i}")
+            s_user = User(
+                email=f"student{i}@test.progressrooms.local",
+                full_name=f"Student {i}",
+                phone=f"+91 98765 {43000 + i:05d}",
+                whatsapp_number=f"+91 91234 {56000 + i:05d}",
+                is_verified=True,
+                account_status="ACTIVE",
+            )
             db.add(s_user)
             await db.flush()
-            db.add(UserAuthMethod(user_id=s_user.id, auth_type="OTP", otp_code="123456", otp_expires_at=now + timedelta(days=365)))
-            db.add(OrganizationStudent(organization_id=org_a.id, user_id=s_user.id, student_notes="Regular practitioner"))
+
+            db.add(OrganizationStudent(organization_id=org_a.id, user_id=s_user.id,
+                                       student_notes="Regular practitioner", status=student_states[i - 1]))
             students.append(s_user)
 
         # Enroll student 1 in Morning Hatha Flow
@@ -268,6 +269,18 @@ async def seed_database():
             sessions_attended=2
         )
         db.add(enr1)
+
+        # One-, two-, and three-month histories, plus paused and cancelled examples.
+        db.add_all([
+            SessionEnrollment(organization_id=org_a.id, session_id=s1.id, user_id=students[1].id,
+                              status=EnrollmentStatus.ACTIVE.value, valid_from=now - timedelta(days=30), valid_until=now + timedelta(days=5), total_sessions=12, sessions_attended=8),
+            SessionEnrollment(organization_id=org_a.id, session_id=s1.id, user_id=students[2].id,
+                              status=EnrollmentStatus.ACTIVE.value, valid_from=now - timedelta(days=60), valid_until=now + timedelta(days=12), total_sessions=24, sessions_attended=17),
+            SessionEnrollment(organization_id=org_a.id, session_id=s2.id, user_id=students[3].id,
+                              status=EnrollmentStatus.PAUSED.value, valid_from=now - timedelta(days=90), valid_until=now + timedelta(days=10), paused_at=now - timedelta(days=3), total_sessions=36, sessions_attended=23),
+            SessionEnrollment(organization_id=org_a.id, session_id=s1.id, user_id=students[14].id,
+                              status=EnrollmentStatus.CANCELLED.value, valid_from=now - timedelta(days=45), valid_until=now - timedelta(days=15), total_sessions=12, sessions_attended=5),
+        ])
 
         # Generate concrete occurrences for Org A
         # Occurrence 1: Upcoming tomorrow
@@ -324,10 +337,10 @@ async def seed_database():
         db.add(org_b)
         await db.flush()
 
-        john_user = User(email="studio@test.progressrooms.local", full_name="John Mayer")
+        john_user = User(role="STUDIO", email="studio@test.progressrooms.local", full_name="John Mayer")
         db.add(john_user)
         await db.flush()
-        db.add(UserAuthMethod(user_id=john_user.id, auth_type="OTP", otp_code="123456", otp_expires_at=now + timedelta(days=365)))
+
         db.add(OrganizationMember(organization_id=org_b.id, user_id=john_user.id, role=UserRole.OWNER.value, title="Academy Director"))
         db.add(OrganizationSubscription(organization_id=org_b.id, plan_id=core_plan.id, status="ACTIVE", starts_at=now, ends_at=now + timedelta(days=365)))
         db.add(OrganizationWebsite(
@@ -363,10 +376,10 @@ async def seed_database():
         db.add(org_c)
         await db.flush()
 
-        dance_owner = User(email="dance.owner@test.progressrooms.local", full_name="Natasha Romanov")
+        dance_owner = User(role="STUDIO", email="dance.owner@test.progressrooms.local", full_name="Natasha Romanov")
         db.add(dance_owner)
         await db.flush()
-        db.add(UserAuthMethod(user_id=dance_owner.id, auth_type="OTP", otp_code="123456", otp_expires_at=now + timedelta(days=365)))
+
         db.add(OrganizationMember(organization_id=org_c.id, user_id=dance_owner.id, role=UserRole.OWNER.value, title="Artistic Director"))
         db.add(OrganizationSubscription(organization_id=org_c.id, plan_id=studio_plan.id, status="ACTIVE", starts_at=now, ends_at=now + timedelta(days=365)))
         db.add(OrganizationWebsite(

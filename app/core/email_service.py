@@ -242,8 +242,8 @@ async def send_otp_email(
         elif response.status_code == 401:
             err_data = response.json() if response.content else {}
             err_msg = err_data.get("message", response.text)
-            logger.warning(f"[Brevo 401] Unauthorized / IP whitelist required: {err_msg}")
-            return {"success": False, "error": "IP_NOT_AUTHORIZED", "details": err_msg}
+            logger.warning(f"[Brevo 401] Unauthorized / IP whitelist required: {err_msg} | OTP for {to_email}: {otp_code}")
+            return {"success": False, "error": "IP_NOT_AUTHORIZED", "details": err_msg, "otp_code": otp_code}
         else:
             logger.error(f"[Brevo Error] HTTP {response.status_code}: {response.text}")
             return {"success": False, "error": f"HTTP_{response.status_code}", "details": response.text}

@@ -7,6 +7,7 @@ from app.core.security import decode_access_token
 async def test_request_and_verify_otp(db_session):
     email = "test.teacher@progressrooms.local"
 
+    await AuthService.register_user(db_session, "Test Teacher", email, "securepass123", role="STUDIO")
     otp_code, record_id, is_verified, requires_activation, msg = await AuthService.request_otp(db_session, email)
     assert len(otp_code) == 6
 
@@ -24,6 +25,7 @@ async def test_request_and_verify_otp(db_session):
 @pytest.mark.asyncio
 async def test_invalid_otp_fails(db_session):
     email = "test.fail@progressrooms.local"
+    await AuthService.register_user(db_session, "Test Fail", email, "securepass123", role="STUDIO")
     await AuthService.request_otp(db_session, email)
 
     with pytest.raises(HTTPException):

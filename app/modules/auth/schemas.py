@@ -1,13 +1,32 @@
-from pydantic import BaseModel, EmailStr
+from app.common.phone import PhoneNumber
+from pydantic import BaseModel, EmailStr, Field, StrictBool, field_validator, model_validator
+from typing import Literal
 import uuid
 
 class RegisterRequest(BaseModel):
-    full_name: str
-    email: str
-    password: str | None = None
-    phone: str | None = None
-    role: str = "STUDIO" # "STUDIO" or "STUDENT"
+    full_name: str = Field(min_length=1, max_length=255)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    phone: PhoneNumber | None = None
+    whatsapp_number: PhoneNumber | None = None
+    role: Literal["STUDIO", "STUDENT"] = "STUDIO"
+    location: str | None = Field(default=None, max_length=255)
     studio_name: str | None = None
+    privacy_accepted: StrictBool
+    privacy_policy_version: Literal["2026-09-27"]
+
+    @model_validator(mode="after")
+    def require_student_phone(self):
+        if self.role == "STUDENT" and not self.phone:
+            raise ValueError("Student phone number is required")
+        return self
+
+    @field_validator("privacy_accepted")
+    @classmethod
+    def require_privacy_consent(cls, value):
+        if value is not True:
+            raise ValueError("Privacy Policy consent is required")
+        return value
 
 class RegisterResponse(BaseModel):
     message: str
@@ -19,6 +38,9 @@ class RegisterResponse(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+class DevLoginRequest(BaseModel):
+    role: str
 
 class LoginResponse(BaseModel):
     access_token: str | None = None
@@ -61,6 +83,12 @@ class UserResponse(BaseModel):
     email: str
     full_name: str
     is_superadmin: bool
+    role: str
+    phone: str | None = None
+    whatsapp_number: str | None = None
+    username: str | None = None
+    address: str | None = None
+    location: str | None = None
     avatar_url: str | None = None
 
     class Config:
