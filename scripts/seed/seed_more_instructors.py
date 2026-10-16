@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy import select
 from app.core.database import AsyncSessionLocal
 from app.models.organization import Organization, OrganizationMember, OrganizationSetting
-from app.models.user import User, UserAuthMethod
+from app.models.user import User
 from app.models.plan import Plan, OrganizationSubscription
 from app.models.session import Session, ClassType
 from app.common.enums import UserRole, OrgStatus
@@ -72,7 +72,7 @@ async def seed_more():
                     u = User(role=inst_data["role"], email=inst_data["email"], full_name=inst_data["name"])
                     db.add(u)
                     await db.flush()
-                    db.add(UserAuthMethod(user_id=u.id, auth_type="OTP", otp_code="123456", otp_expires_at=now + timedelta(days=365)))
+
 
                 member = OrganizationMember(
                     organization_id=org.id,

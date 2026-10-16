@@ -1,5 +1,5 @@
 from app.core.database import Base
-from app.models.user import User, UserAuthMethod, UserSession
+from app.models.user import User, UserSession
 from app.models.otp import UserOtp
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent, OrganizationSetting
 from app.models.plan import Plan, PlanFeature, OrganizationSubscription
@@ -11,12 +11,19 @@ from app.models.website import WebsiteTemplate, OrganizationWebsite, Organizatio
 from app.models.audit import AuditLog
 from app.models.integration import OrganizationIntegration, Notification
 from app.models.membership_tier import MembershipTier, MembershipTierClass
-from app.models.support import SupportTicket, SupportMessage
+from app.models.communication import (
+    PlatformCommunicationSetting,
+    CommunicationChannelAuditLog,
+    CommunicationLog,
+    UserCommunicationPreference,
+    ClassReminderSchedule,
+    PendingMaterialChange,
+    StudioCommunicationBudget,
+)
 
 __all__ = [
     "Base",
     "User",
-    "UserAuthMethod",
     "UserSession",
     "UserOtp",
     "Organization",
@@ -52,4 +59,11 @@ __all__ = [
     "MembershipTierClass",
     "SupportTicket",
     "SupportMessage",
+    "PlatformCommunicationSetting",
+    "CommunicationChannelAuditLog",
+    "CommunicationLog",
+    "UserCommunicationPreference",
+    "ClassReminderSchedule",
+    "PendingMaterialChange",
+    "StudioCommunicationBudget",
 ]

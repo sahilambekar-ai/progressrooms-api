@@ -129,6 +129,15 @@ async def reschedule_occurrence(
         reason=payload.reason
     )
     db.add(change)
+
+    from app.modules.communication.reminder_engine import record_class_edit
+    await record_class_edit(
+        db=db,
+        occurrence_id=occ.id,
+        changed_fields={"actual_start_at": payload.new_start_at, "actual_end_at": payload.new_end_at},
+        old_values={"actual_start_at": old_start}
+    )
+
     await db.commit()
 
     return {"message": "Occurrence rescheduled successfully", "new_start_at": payload.new_start_at.isoformat()}
@@ -180,6 +189,14 @@ async def cancel_occurrence(
         reason=payload.reason
     )
     db.add(change)
+
+    from app.modules.communication.reminder_engine import handle_class_cancellation
+    await handle_class_cancellation(
+        db=db,
+        occurrence_id=occ.id,
+        reason=payload.reason
+    )
+
     await db.commit()
 
     return {"message": "Occurrence cancelled successfully"}

@@ -90,6 +90,13 @@ class SchedulingEngine:
                             meeting_url=session.meeting_url
                         )
                         db.add(occ)
+                        await db.flush()
+                        from app.modules.communication.reminder_engine import sync_reminder_schedules_for_occurrence
+                        await sync_reminder_schedules_for_occurrence(
+                            db=db,
+                            occurrence_id=occ.id,
+                            new_start_at=start_dt
+                        )
                         created_count += 1
 
                 current_date += timedelta(days=1)

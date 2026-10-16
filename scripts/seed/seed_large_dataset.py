@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.abspath("."))
 
 from app.core.database import AsyncSessionLocal
 from app.core.security import get_password_hash
-from app.models.user import User, UserAuthMethod
+from app.models.user import User
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent
 from app.models.session import ClassType, Session, SessionPricing, SessionInstructor
 from app.models.schedule import SessionScheduleRule, ClassOccurrence
@@ -160,8 +160,7 @@ async def seed_organization_data(db, org):
             )
             db.add(user)
             await db.flush()
-            db.add(UserAuthMethod(user_id=user.id, auth_type="PASSWORD", credential_hash=user.password_hash))
-            db.add(UserAuthMethod(user_id=user.id, auth_type="OTP", otp_code="123456", otp_expires_at=now + timedelta(days=365)))
+
 
         member = await db.scalar(select(OrganizationMember).where(
             OrganizationMember.organization_id == org.id,
@@ -408,7 +407,7 @@ async def seed_organization_data(db, org):
                 )
                 db.add(user)
                 await db.flush()
-                db.add(UserAuthMethod(user_id=user.id, auth_type="OTP", otp_code="123456", otp_expires_at=now + timedelta(days=365)))
+
             else:
                 user = existing_user
 

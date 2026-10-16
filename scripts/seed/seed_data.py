@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, date, time, timedelta, timezone
 from sqlalchemy import select
 from app.core.database import AsyncSessionLocal, engine, Base
-from app.models.user import User, UserAuthMethod
+from app.models.user import User
 from app.models.organization import Organization, OrganizationMember, OrganizationSetting, OrganizationStudent
 from app.models.plan import Plan, PlanFeature, OrganizationSubscription
 from app.models.session import ClassType, Session, SessionInstructor, SessionPricing, SessionRequirement
@@ -31,12 +31,6 @@ async def seed_database():
         db.add(admin_user)
         await db.flush()
 
-        db.add(UserAuthMethod(
-            user_id=admin_user.id,
-            auth_type="OTP",
-            otp_code="123456",
-            otp_expires_at=datetime.now(timezone.utc) + timedelta(days=365)
-        ))
 
         # 2. Website Templates
         tmpl_default = WebsiteTemplate(name="Default Classic", code="DEFAULT")
@@ -90,8 +84,6 @@ async def seed_database():
         db.add_all([sahil_user, ananya_user, rohit_user])
         await db.flush()
 
-        for u in [sahil_user, ananya_user, rohit_user]:
-            db.add(UserAuthMethod(user_id=u.id, auth_type="OTP", otp_code="123456", otp_expires_at=datetime.now(timezone.utc) + timedelta(days=365)))
 
         mem_owner = OrganizationMember(organization_id=org_a.id, user_id=sahil_user.id, role=UserRole.OWNER.value, title="Founder & Lead Guru", bio="Certified Hatha & Vinyasa master with 12+ years experience.")
         mem_ananya = OrganizationMember(organization_id=org_a.id, user_id=ananya_user.id, role=UserRole.INSTRUCTOR.value, teacher_code="11000001", title="Aerial Yoga Specialist", bio="Aerial silks and restorative yoga practitioner.")
@@ -237,7 +229,7 @@ async def seed_database():
             )
             db.add(s_user)
             await db.flush()
-            db.add(UserAuthMethod(user_id=s_user.id, auth_type="OTP", otp_code="123456", otp_expires_at=now + timedelta(days=365)))
+
             db.add(OrganizationStudent(organization_id=org_a.id, user_id=s_user.id,
                                        student_notes="Regular practitioner", status=student_states[i - 1]))
             students.append(s_user)
@@ -348,7 +340,7 @@ async def seed_database():
         john_user = User(role="STUDIO", email="studio@test.progressrooms.local", full_name="John Mayer")
         db.add(john_user)
         await db.flush()
-        db.add(UserAuthMethod(user_id=john_user.id, auth_type="OTP", otp_code="123456", otp_expires_at=now + timedelta(days=365)))
+
         db.add(OrganizationMember(organization_id=org_b.id, user_id=john_user.id, role=UserRole.OWNER.value, title="Academy Director"))
         db.add(OrganizationSubscription(organization_id=org_b.id, plan_id=core_plan.id, status="ACTIVE", starts_at=now, ends_at=now + timedelta(days=365)))
         db.add(OrganizationWebsite(
@@ -387,7 +379,7 @@ async def seed_database():
         dance_owner = User(role="STUDIO", email="dance.owner@test.progressrooms.local", full_name="Natasha Romanov")
         db.add(dance_owner)
         await db.flush()
-        db.add(UserAuthMethod(user_id=dance_owner.id, auth_type="OTP", otp_code="123456", otp_expires_at=now + timedelta(days=365)))
+
         db.add(OrganizationMember(organization_id=org_c.id, user_id=dance_owner.id, role=UserRole.OWNER.value, title="Artistic Director"))
         db.add(OrganizationSubscription(organization_id=org_c.id, plan_id=studio_plan.id, status="ACTIVE", starts_at=now, ends_at=now + timedelta(days=365)))
         db.add(OrganizationWebsite(

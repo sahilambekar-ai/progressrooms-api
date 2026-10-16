@@ -18,6 +18,7 @@ from app.modules.admin.router import router as admin_router
 from app.modules.membership_tiers.router import router as membership_tiers_router
 from app.modules.billing.router import router as billing_router
 from app.modules.support.router import router as support_router
+from app.modules.communication.router import router as communication_router
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -54,6 +55,7 @@ api_v1.include_router(students_directory_router)
 api_v1.include_router(teachers_router)
 api_v1.include_router(admin_router)
 api_v1.include_router(support_router)
+api_v1.include_router(communication_router)
 
 app.mount(settings.API_V1_STR, api_v1)
 

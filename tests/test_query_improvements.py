@@ -110,7 +110,6 @@ async def test_roster_only_reads_requested_attendance(db_session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_otp_request_does_not_store_plaintext_mirror(db_session, monkeypatch):
-    from app.models.user import UserAuthMethod
     from app.models.otp import UserOtp
     from app.modules.auth.service import AuthService, _hash_string
     user = User(email=f'{uuid.uuid4().hex}@example.com', full_name='OTP learner')
@@ -120,8 +119,7 @@ async def test_otp_request_does_not_store_plaintext_mirror(db_session, monkeypat
     code, record_id, *_ = await AuthService.request_otp(db_session, user.email)
     record = await db_session.get(UserOtp, uuid.UUID(record_id))
     assert record.otp_hash == _hash_string(code)
-    assert await db_session.scalar(select(func.count()).select_from(UserAuthMethod).where(
-        UserAuthMethod.user_id == user.id, UserAuthMethod.auth_type == 'OTP')) == 0
+    assert "user_auth_methods" not in User.metadata.tables
     token, verified = await AuthService.verify_otp(db_session, user.email, code)
     assert token and verified.is_verified
 

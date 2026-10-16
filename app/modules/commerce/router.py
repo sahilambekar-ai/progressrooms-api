@@ -113,8 +113,15 @@ async def verify_payment(
     order.status = OrderStatus.PAID.value
 
     enrollment = await CommerceService.activate_enrollment_from_order(db, order, payment)
-
     await db.commit()
+
+    try:
+        from app.modules.communication.billing_engine import notify_student_payment_received
+        await notify_student_payment_received(db, order.id)
+    except Exception as exc:
+        import logging
+        logging.getLogger("progressrooms.commerce").error(f"Failed to dispatch payment confirmation: {exc}")
+
     return {
         "success": True,
         "order_status": order.status,
@@ -160,6 +167,15 @@ async def razorpay_webhook(
             db.add(payment)
             order.status = "PAID"
             await CommerceService.activate_enrollment_from_order(db, order, payment)
+            await db.commit()
+
+            try:
+                from app.modules.communication.billing_engine import notify_student_payment_received
+                await notify_student_payment_received(db, order.id)
+            except Exception as exc:
+                import logging
+                logging.getLogger("progressrooms.commerce").error(f"Failed to dispatch payment confirmation: {exc}")
     db.add(PaymentWebhookEvent(event_id=event_id, event_type=event_type, payload=body, is_processed=True))
     await db.commit()
     return {"status": "received"}
+

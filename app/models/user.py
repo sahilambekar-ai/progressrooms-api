@@ -33,22 +33,9 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     otps: Mapped[list["UserOtp"]] = relationship("UserOtp", back_populates="user", cascade="all, delete-orphan")
-    auth_methods: Mapped[list["UserAuthMethod"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     memberships: Mapped[list["OrganizationMember"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     enrollments: Mapped[list["SessionEnrollment"]] = relationship(back_populates="user")
     orders: Mapped[list["Order"]] = relationship(back_populates="user")
-
-class UserAuthMethod(Base, TimestampMixin):
-    __tablename__ = "user_auth_methods"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    auth_type: Mapped[str] = mapped_column(String(50), nullable=False) # OTP, PASSWORD, GOOGLE
-    credential_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    otp_code: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    otp_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    user: Mapped["User"] = relationship(back_populates="auth_methods")
 
 class UserSession(Base, TimestampMixin):
     __tablename__ = "user_sessions"

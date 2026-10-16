@@ -9,7 +9,7 @@ from httpx import AsyncClient
 
 from app.main import app, api_v1
 from app.core.database import get_db
-from app.models.user import User, UserAuthMethod
+from app.models.user import User
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent, OrganizationSetting
 from app.models.session import ClassType, Session, SessionInstructor, SessionPricing
 from app.models.schedule import SessionScheduleRule, ClassOccurrence
@@ -363,11 +363,7 @@ async def test_password_recovery_journey(client: AsyncClient, db_session):
     from app.models.otp import UserOtp
     from app.modules.auth.service import _hash_string
 
-    db_session.add(UserAuthMethod(
-        user_id=user.id,
-        auth_type="PASSWORD",
-        credential_hash=get_password_hash(old_pw)
-    ))
+    user.password_hash = get_password_hash(old_pw)
     await db_session.commit()
 
     # 1. Request forgot password OTP

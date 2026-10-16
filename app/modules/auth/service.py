@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.user import User, UserAuthMethod
+from app.models.user import User
 from app.models.otp import UserOtp
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent, OrganizationSetting
 from app.core.security import create_access_token, verify_password, get_password_hash
@@ -84,23 +84,6 @@ class AuthService:
                 user.location = location
             user.role = role
             user.account_status = "PENDING_VERIFICATION"
-
-        if pwd_hash:
-            auth_stmt = select(UserAuthMethod).where(
-                UserAuthMethod.user_id == user.id,
-                UserAuthMethod.auth_type == "PASSWORD"
-            )
-            auth_res = await db.execute(auth_stmt)
-            auth_m = auth_res.scalar_one_or_none()
-            if not auth_m:
-                auth_m = UserAuthMethod(
-                    user_id=user.id,
-                    auth_type="PASSWORD",
-                    credential_hash=pwd_hash
-                )
-                db.add(auth_m)
-            else:
-                auth_m.credential_hash = pwd_hash
 
         # Setup Studio Organization if Studio/Instructor role
         if role == "STUDIO":
@@ -332,15 +315,6 @@ class AuthService:
         if full_name:
             user.full_name = full_name
 
-        auth_stmt = select(UserAuthMethod).where(
-            UserAuthMethod.user_id == user.id,
-            UserAuthMethod.auth_type == "OTP"
-        )
-        auth_res = await db.execute(auth_stmt)
-        auth_method = auth_res.scalar_one_or_none()
-        if auth_method:
-            auth_method.otp_code = None
-
         await db.commit()
         await db.refresh(user)
 
@@ -371,22 +345,8 @@ class AuthService:
                 detail="Invalid email or password."
             )
 
-        # Validate password
-        is_valid = False
-        if user.password_hash:
-            is_valid = verify_password(password, user.password_hash)
-        else:
-            # Check user_auth_methods table
-            auth_stmt = select(UserAuthMethod).where(
-                UserAuthMethod.user_id == user.id,
-                UserAuthMethod.auth_type == "PASSWORD"
-            )
-            auth_res = await db.execute(auth_stmt)
-            auth_m = auth_res.scalar_one_or_none()
-            if auth_m and auth_m.credential_hash:
-                is_valid = verify_password(password, auth_m.credential_hash)
-
-        if not is_valid:
+        # Password credentials have one authoritative location.
+        if not user.password_hash or not verify_password(password, user.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password."
@@ -583,21 +543,6 @@ class AuthService:
 
         new_hash = get_password_hash(new_password)
         user.password_hash = new_hash
-
-        auth_stmt = select(UserAuthMethod).where(
-            UserAuthMethod.user_id == user.id,
-            UserAuthMethod.auth_type == "PASSWORD"
-        )
-        auth_m = (await db.execute(auth_stmt)).scalar_one_or_none()
-        if auth_m:
-            auth_m.credential_hash = new_hash
-        else:
-            auth_m = UserAuthMethod(
-                user_id=user.id,
-                auth_type="PASSWORD",
-                credential_hash=new_hash
-            )
-            db.add(auth_m)
 
         user.is_verified = True
         user.account_status = "ACTIVE"
