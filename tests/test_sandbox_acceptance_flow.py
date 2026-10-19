@@ -10,6 +10,7 @@ import httpx
 from sqlalchemy import select
 
 from app.main import app, api_v1
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import create_access_token, get_password_hash
 from app.models.user import User
@@ -38,6 +39,10 @@ def auth_header(user: User):
 @pytest.mark.asyncio
 async def test_sandbox_payment_acceptance_flow(client, db_session, monkeypatch):
     """End-to-end sandbox acceptance run validating payment -> enrollment -> teacher roster -> student upcoming -> attendance -> credit deduction."""
+    # Configure the sandbox explicitly; CI must not depend on a local .env.
+    monkeypatch.setattr(settings, "DEV_TEST_LOGIN_ENABLED", True)
+    monkeypatch.setattr(settings, "RAZORPAY_KEY_ID", "rzp_test_mock_progressrooms")
+    monkeypatch.setattr(settings, "RAZORPAY_KEY_SECRET", "rzp_secret_mock_progressrooms")
     # 1. Setup Studio Organization and Owner
     owner_user = User(
         email=f"owner_{uuid.uuid4().hex[:8]}@studio.test",
