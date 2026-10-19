@@ -1,0 +1,91 @@
+name: API CI and UAT
+
+on:
+  pull_request:
+    branches: [dev, uat, main]
+  push:
+    branches: [dev, uat, main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: progressrooms_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d progressrooms_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      BREVO_ENABLED: "false"
+      DATABASE_URL: postgresql+asyncpg://postgres:ci-only-password@127.0.0.1:5432/progressrooms_ci
+      SYNC_DATABASE_URL: postgresql://postgres:ci-only-password@127.0.0.1:5432/progressrooms_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Verify migrations against PostgreSQL
+        run: |
+          alembic upgrade head
+          alembic current
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Verify deployment script syntax
+        run: bash -n deploy/uat.sh
+      - name: Build API image
+        run: docker build --tag progressrooms-api-ci:${{ github.sha }} .
+
+  deploy-uat:
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/uat'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    concurrency:
+      group: api-uat-deployment
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare UAT image and deployment files
+        run: |
+          docker build --tag progressrooms-api-uat:${{ github.sha }} .
+          mkdir bundle
+          docker save progressrooms-api-uat:${{ github.sha }} | gzip > bundle/api-image.tar.gz
+          cp deploy/compose.api.yaml deploy/uat.sh bundle/
+      - name: Upload release to UAT
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          port: ${{ secrets.VPS_PORT }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}
+          fingerprint: ${{ secrets.VPS_HOST_FINGERPRINT }}
+          source: bundle/*
+          strip_components: 1
+          target: /opt/progressrooms/uat/incoming/api-${{ github.sha }}
+          command_timeout: 10m
+      - name: Migrate and start UAT API
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          port: ${{ secrets.VPS_PORT }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}
+          fingerprint: ${{ secrets.VPS_HOST_FINGERPRINT }}
+          command_timeout: 10m
+          script: bash /opt/progressrooms/uat/incoming/api-${{ github.sha }}/uat.sh '${{ github.sha }}'
