@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import String, Boolean, Text, Integer, Numeric, ForeignKey, CheckConstraint
+from sqlalchemy import String, Boolean, Text, Integer, Numeric, ForeignKey, CheckConstraint, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base, TimestampMixin, SoftDeleteMixin
@@ -24,6 +24,8 @@ class MembershipTier(Base, TimestampMixin, SoftDeleteMixin):
     total_classes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    class_packages: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     organization: Mapped["Organization"] = relationship()
     classes: Mapped[list["MembershipTierClass"]] = relationship(back_populates="tier", cascade="all, delete-orphan")

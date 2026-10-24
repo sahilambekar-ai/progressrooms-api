@@ -29,6 +29,7 @@ compose=(docker compose -p uat --env-file .env -f compose.yaml -f "$bundle/compo
 # Migrations run once, before changing the running API container.
 "${compose[@]}" run --rm --no-deps api alembic upgrade head
 "${compose[@]}" up -d --no-deps --wait --wait-timeout 180 api
+"${compose[@]}" up -d --no-deps zoom-maintenance
 curl --fail --silent --show-error http://127.0.0.1:8100/health
 
 # Keep the previous tag/compose in backups; never modify Web's .env.

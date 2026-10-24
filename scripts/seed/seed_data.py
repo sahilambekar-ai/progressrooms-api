@@ -14,7 +14,7 @@ from app.models.website import WebsiteTemplate, OrganizationWebsite
 from app.common.enums import UserRole, SessionType, SkillLevel, PricingType, OccurrenceStatus, OrderStatus, PaymentStatus, EnrollmentStatus, AttendanceStatus
 
 async def seed_database():
-    print("Seeding ProgressRooms database...")
+    print("Seeding Progress Rooms database...")
     async with AsyncSessionLocal() as db:
         # Check if already seeded
         existing_admin = await db.execute(select(User).where(User.email == "admin@test.progressrooms.local"))

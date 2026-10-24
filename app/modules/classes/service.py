@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.session import Session
+from app.models.session import Session, SessionPricing
 from app.models.schedule import ClassOccurrence
 from app.models.attendance import AttendanceRecord
 from app.common.enums import SessionType, OccurrenceStatus, AttendanceStatus
@@ -28,6 +28,7 @@ async def auto_complete_expired_one_on_one_classes(db: AsyncSession, org_id: uui
             Session.organization_id == org_id,
             Session.session_type == SessionType.ONE_TO_ONE.value,
             Session.deleted_at.is_(None),
+            Session.pricing.has((SessionPricing.pricing_type == "PER_SESSION") & (SessionPricing.total_classes == 1)),
             Session.occurrences.any(ClassOccurrence.actual_end_at <= now)
         )
     )
@@ -45,6 +46,9 @@ async def auto_complete_expired_one_on_one_classes(db: AsyncSession, org_id: uui
                 if occ.status not in (OccurrenceStatus.COMPLETED.value, OccurrenceStatus.CANCELLED.value):
                     occ.status = OccurrenceStatus.COMPLETED.value
                     completed_count += 1
+
+                if occ.status == OccurrenceStatus.CANCELLED.value:
+                    continue
 
                 # Record attendance for all enrolled students
                 for enr in sess.enrollments:

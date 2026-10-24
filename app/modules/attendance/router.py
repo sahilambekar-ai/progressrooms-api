@@ -1,3 +1,4 @@
+from app.modules.attendance.status import roster_status
 import uuid
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -49,7 +50,7 @@ async def get_attendance_roster(
         "student_id": str(enr.user_id),
         "student_name": user.full_name,
         "student_email": user.email,
-        "attendance_status": attendance_status or "UNMARKED",
+        "attendance_status": roster_status(occ.actual_start_at, occ.status, attendance_status),
         "sessions_attended": enr.sessions_attended,
         "total_sessions": enr.total_sessions,
     } for enr, user, attendance_status in rows]

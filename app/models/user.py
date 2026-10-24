@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, CheckConstraint, Index, text
+from sqlalchemy import Text, String, Boolean, DateTime, ForeignKey, CheckConstraint, Index, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base, TimestampMixin, SoftDeleteMixin
@@ -13,6 +13,8 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     username: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
     address: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    dashboard_font: Mapped[str] = mapped_column(String(20), nullable=False, default="ibm-plex", server_default="ibm-plex")
+    billing_country: Mapped[str | None] = mapped_column(String(2), nullable=True)
     __table_args__ = (
         CheckConstraint("role IN ('SUPER_ADMIN', 'STUDIO', 'TEACHER', 'STUDENT')", name="ck_users_role"),
         CheckConstraint("is_superadmin = (role = 'SUPER_ADMIN')", name="ck_users_superadmin_consistent"),
@@ -28,6 +30,8 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    managed_password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    teacher_invitation_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     account_status: Mapped[str] = mapped_column(String(50), default="ACTIVE", nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

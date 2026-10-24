@@ -48,6 +48,24 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  zoom-maintenance:
+    image: progressrooms-api-uat:${API_IMAGE_TAG:?API_IMAGE_TAG must be set}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - api.env
+    command: ["python", "-m", "app.modules.zoom.maintenance"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: 0.25
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   postgres_data:
   api_uploads:

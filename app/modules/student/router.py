@@ -1,3 +1,4 @@
+from app.modules.attendance.status import calendar_status
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -57,6 +58,8 @@ async def get_my_enrollments(
         usage = dict((await db.execute(select(SessionEnrollment.purchase_order_id, func.sum(SessionEnrollment.sessions_attended))
             .where(SessionEnrollment.purchase_order_id.in_(purchase_ids)).group_by(SessionEnrollment.purchase_order_id))).all())
 
+    from app.models.commerce import Order
+    purchase_limits = dict((await db.execute(select(Order.id, Order.credit_limit).where(Order.id.in_(purchase_ids)))).all()) if purchase_ids else {}
     enrollment_ids = [e.id for e in enrollments]
     restored_map = {}
     if enrollment_ids:
@@ -71,9 +74,10 @@ async def get_my_enrollments(
         restored_map = dict(restored_rows)
 
     tiers = (await db.execute(
-        select(MembershipTier.id, MembershipTier.name, MembershipTier.organization_id)
+        select(MembershipTier.id, MembershipTier.name, MembershipTier.organization_id, MembershipTier.description)
         .where(MembershipTier.is_active == True, MembershipTier.deleted_at.is_(None))
     )).all()
+    tier_descriptions = {(t.organization_id, t.name): t.description for t in tiers}
     tier_name_map = {(t.organization_id, t.name): str(t.id) for t in tiers}
 
     return [
@@ -86,12 +90,13 @@ async def get_my_enrollments(
             "session_id": str(e.session_id),
             "tier_id": tier_name_map.get((e.organization_id, e.billing_label)),
             "session_name": e.session.name if e.session else "Session",
+            "description": tier_descriptions.get((e.organization_id, e.billing_label)) or (e.session.full_description if e.session else None),
             "organization_name": e.session.organization.name if e.session and e.session.organization else "Studio",
             "organization_slug": e.session.organization.slug if e.session and e.session.organization else "",
             "status": "EXPIRED" if e.status == "ACTIVE" and e.valid_until and e.valid_until.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc) else e.status,
             "valid_from": e.valid_from.isoformat(),
             "valid_until": e.valid_until.isoformat() if e.valid_until else None,
-            "total_sessions": e.total_sessions,
+            "total_sessions": purchase_limits.get(e.purchase_order_id, e.total_sessions),
             "sessions_attended": usage.get(e.purchase_order_id, e.sessions_attended),
             "sessions_restored": restored_map.get(e.id, 0),
         }
@@ -142,7 +147,7 @@ async def get_my_upcoming_classes(
         occ_end = o.actual_end_at.replace(tzinfo=timezone.utc) if o.actual_end_at.tzinfo is None else o.actual_end_at
         seconds_to_start = (occ_start - now).total_seconds()
 
-        if o.status != "SCHEDULED":
+        if o.status not in {"SCHEDULED", "RESCHEDULED", "IN_PROGRESS"}:
             can_join = False
             reason = f"Class is {o.status.lower()}"
         elif occ_end <= now:
@@ -160,6 +165,7 @@ async def get_my_upcoming_classes(
             "id": str(o.id),
             "name": o.session.name if o.session else "Session",
             "session_name": o.session.name if o.session else "Session",
+            "description": o.session.full_description if o.session else None,
             "organization_name": o.session.organization.name if o.session and o.session.organization else "Studio",
             "organization_slug": o.session.organization.slug if o.session and o.session.organization else "",
             "instructor_name": o.instructor.user.full_name if o.instructor and o.instructor.user else "Teacher",
@@ -198,7 +204,7 @@ async def get_class_meeting_url(
     candidates = (await db.execute(enr_stmt)).scalars().all()
     enr = None
     for candidate in candidates:
-        if await available_credit(db, candidate):
+        if await available_credit(db, candidate, lock_pass=False):
             enr = candidate
             break
     if not enr:
@@ -208,11 +214,13 @@ async def get_class_meeting_url(
         )
 
     # Check join time window: within 15 minutes of start and before end
+    from app.modules.billing.saas import require_operational_access
+    await require_operational_access(db, occ.organization_id)
     occ_start = occ.actual_start_at.replace(tzinfo=timezone.utc) if occ.actual_start_at.tzinfo is None else occ.actual_start_at
     occ_end = occ.actual_end_at.replace(tzinfo=timezone.utc) if occ.actual_end_at.tzinfo is None else occ.actual_end_at
     seconds_until_start = (occ_start - now).total_seconds()
 
-    if occ_end <= now or occ.status != "SCHEDULED":
+    if occ_end <= now or occ.status not in {"SCHEDULED", "RESCHEDULED", "IN_PROGRESS"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This class is no longer open for joining."
@@ -224,8 +232,12 @@ async def get_class_meeting_url(
         )
 
     # Provision or retrieve real meeting room
+    organization = occ.session.organization
     try:
-        meeting_data = await get_or_create_occurrence_meeting(db, occ, occ.session.organization, is_host=False)
+        meeting_data = await get_or_create_occurrence_meeting(db, occ, organization, is_host=False)
+        from app.modules.billing.platform import record_join
+        await record_join(db, organization, current_user, enr, occ)
+        await db.commit()
         return {
             "meeting_url": meeting_data["target_url"],
             "provider": meeting_data["provider"],
@@ -255,7 +267,7 @@ async def cancel_student_class_booking(
     if occ_start - now < timedelta(hours=2):
         raise HTTPException(
             status_code=400,
-            detail="Late cancellation: bookings can only be cancelled at least 2 hours before start time. Session credit cannot be refunded."
+            detail="Late cancellation: bookings can only be cancelled at least 2 hours before start time. This booking cannot be cancelled in the app. Contact your teacher or studio for help. No payment is returned."
         )
 
     # Find the active enrollment for this class
@@ -292,8 +304,8 @@ async def cancel_student_class_booking(
 
     await db.commit()
     return {
-        "message": "Class booking cancelled successfully. Your session credit remains available on your pass.",
-        "refunded": True,
+        "message": "Class booking cancelled successfully. Your session credit remains available on your pass. No payment is returned.",
+        "credit_preserved": True,
         "remaining_credits": max(0, (enr.total_sessions or 0) - enr.sessions_attended) if enr.total_sessions else None
     }
 
@@ -412,7 +424,7 @@ async def reschedule_student_class_booking(
             detail="Target class must start at least 2 hours from now."
         )
 
-    if target_occ.status != "SCHEDULED":
+    if target_occ.status not in {"SCHEDULED", "RESCHEDULED", "IN_PROGRESS"}:
         raise HTTPException(status_code=400, detail="Target class is not open for booking.")
 
     enr = await db.scalar(
@@ -520,26 +532,8 @@ async def get_my_attendance(
     for occ, session, record, enrollment, org in rows:
         org_zone = ZoneInfo(org.timezone or "Asia/Kolkata")
         occ_start = occ.actual_start_at.replace(tzinfo=timezone.utc) if occ.actual_start_at.tzinfo is None else occ.actual_start_at
-        occ_end = occ.actual_end_at.replace(tzinfo=timezone.utc) if occ.actual_end_at.tzinfo is None else occ.actual_end_at
         local = occ_start.astimezone(org_zone)
-
-        # Distinguish: PRESENT, ABSENT, EXCUSED, CANCELLED, UNMARKED, SCHEDULED
-        if record:
-            status_map = {
-                "ATTENDED": "PRESENT",
-                "ABSENT": "ABSENT",
-                "EXCUSED": "EXCUSED",
-                "CANCELLED": "CANCELLED"
-            }
-            status_val = status_map.get(record.status, "PRESENT")
-        elif occ.status == "CANCELLED":
-            status_val = "CANCELLED"
-        elif occ_end < now_utc:
-            # Class has finished in the past without marked attendance
-            status_val = "UNMARKED"
-        else:
-            # Future upcoming class
-            status_val = "SCHEDULED"
+        status_val = calendar_status(occ.actual_start_at, occ.status, record.status if record else None, now_utc)
 
         teacher_name = (
             occ.instructor.user.full_name
@@ -553,6 +547,7 @@ async def get_my_attendance(
             "enrollmentId": str(enrollment.id),
             "date": local.date().isoformat(),
             "time": local.strftime("%I:%M %p"),
+            "startAt": occ_start.isoformat(),
             "sessionTitle": session.name,
             "status": status_val,
             "remarks": record.notes if record else "",

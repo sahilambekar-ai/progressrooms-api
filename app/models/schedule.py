@@ -1,6 +1,6 @@
 import uuid
 from datetime import time, date, datetime, timezone
-from sqlalchemy import String, Boolean, Text, Integer, Time, Date, DateTime, ForeignKey, Index
+from sqlalchemy import String, Boolean, Text, Integer, Time, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base, TimestampMixin
@@ -37,14 +37,23 @@ class ClassOccurrence(Base, TimestampMixin):
     host_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     meeting_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
     provider_meeting_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    zoom_connection_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    zoom_connection_version: Mapped[int | None] = mapped_column(Integer)
+    zoom_host_member_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    zoom_host_email: Mapped[str | None] = mapped_column(String(255))
+    zoom_provisioning_status: Mapped[str] = mapped_column(String(40), default="NOT_PROVISIONED", nullable=False)
+    zoom_operation_key: Mapped[str | None] = mapped_column(String(100))
+    zoom_settings_snapshot: Mapped[dict | None] = mapped_column(JSON)
     cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     session: Mapped["Session"] = relationship(back_populates="occurrences")
-    instructor: Mapped["OrganizationMember"] = relationship()
+    instructor: Mapped["OrganizationMember"] = relationship(foreign_keys=[instructor_id])
     changes: Mapped[list["ClassOccurrenceChange"]] = relationship(back_populates="occurrence", cascade="all, delete-orphan")
     attendance_records: Mapped[list["AttendanceRecord"]] = relationship(back_populates="occurrence", cascade="all, delete-orphan")
 
     __table_args__ = (
+        ForeignKeyConstraint(["organization_id", "zoom_connection_id"], ["teacher_zoom_connections.organization_id", "teacher_zoom_connections.id"], name="fk_occ_zoom_connection"),
+        ForeignKeyConstraint(["organization_id", "zoom_host_member_id"], ["organization_members.organization_id", "organization_members.id"], name="fk_occ_zoom_host"),
         Index("ix_class_occurrences_org_time", "organization_id", "actual_start_at"),
         Index("ix_class_occurrences_session_scheduled", "session_id", "scheduled_start_at"),
     )

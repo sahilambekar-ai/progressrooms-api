@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import String, Boolean, Text, Integer, Numeric, ForeignKey
+from sqlalchemy import String, Boolean, Text, Integer, Numeric, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base, TimestampMixin, SoftDeleteMixin
@@ -28,7 +28,7 @@ class Session(Base, TimestampMixin, SoftDeleteMixin):
     short_description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     full_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     session_type: Mapped[str] = mapped_column(String(50), default=SessionType.GROUP.value, nullable=False)
-    capacity: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
+    capacity: Mapped[int | None] = mapped_column(Integer, nullable=True)
     min_age: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_age: Mapped[int | None] = mapped_column(Integer, nullable=True)
     skill_level: Mapped[str] = mapped_column(String(50), default=SkillLevel.ALL_LEVELS.value, nullable=False)
@@ -68,6 +68,8 @@ class SessionPricing(Base, TimestampMixin):
     currency: Mapped[str] = mapped_column(String(10), default="INR", nullable=False)
     total_classes: Mapped[int | None] = mapped_column(Integer, nullable=True) # For package
     validity_days: Mapped[int | None] = mapped_column(Integer, default=30, nullable=True) # Access window
+
+    packages: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     session: Mapped["Session"] = relationship(back_populates="pricing")
 

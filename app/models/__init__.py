@@ -1,4 +1,6 @@
 from app.core.database import Base
+from app.models.saas_billing import SaaSCheckout, SaaSWebhookEvent
+from app.models.platform_billing import StudentJoinEvent, StudentJoinTeacher, PlatformInvoice
 from app.models.user import User, UserSession
 from app.models.otp import UserOtp
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent, OrganizationSetting
@@ -23,6 +25,9 @@ from app.models.communication import (
 
 __all__ = [
     "Base",
+    "StudentJoinEvent",
+    "StudentJoinTeacher",
+    "PlatformInvoice",
     "User",
     "UserSession",
     "UserOtp",
@@ -67,3 +72,5 @@ __all__ = [
     "PendingMaterialChange",
     "StudioCommunicationBudget",
 ]
+
+from app.models.zoom import TeacherZoomConnection, ZoomOAuthAttempt, ZoomWebhookReceipt, ZoomRevocation

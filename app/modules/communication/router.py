@@ -1,5 +1,5 @@
 import math
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func, desc
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.user import User
 from app.models.communication import CommunicationLog, CommunicationChannelAuditLog
-from app.modules.auth.dependencies import require_superadmin
+from app.modules.auth.dependencies import get_current_user, require_superadmin
+from app.core.config import settings
 from app.modules.communication.schemas import (
     CommunicationSettingsResponse,
     CommunicationSettingsUpdate,
@@ -39,9 +40,18 @@ from app.modules.communication.billing_engine import (
 router = APIRouter(prefix="/admin/communication", tags=["Platform Communication Channels"])
 
 
+async def require_communication_tester(user: User = Depends(get_current_user)) -> User:
+    """Allow studio testing only in the explicitly enabled local development environment."""
+    if user.role == "SUPER_ADMIN":
+        return user
+    if settings.DEV_TEST_LOGIN_ENABLED and user.role == "STUDIO":
+        return user
+    raise HTTPException(status_code=403, detail="Superadmin access required; studio testing is available only in local development")
+
+
 @router.get("/settings", response_model=CommunicationSettingsResponse)
 async def get_communication_settings(
-    admin: User = Depends(require_superadmin),
+    admin: User = Depends(require_communication_tester),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -54,12 +64,12 @@ async def get_communication_settings(
 @router.patch("/settings", response_model=CommunicationSettingsResponse)
 async def patch_communication_settings(
     payload: CommunicationSettingsUpdate,
-    admin: User = Depends(require_superadmin),
+    admin: User = Depends(require_communication_tester),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Toggles operational communication switches for WhatsApp and/or Email.
-    Enforces that only Super Admin can alter platform-wide delivery switches.
+    Requires Super Admin, or an authenticated Studio in explicitly enabled local development.
     Every change is recorded in the channel audit log.
     """
     return await update_settings(
@@ -74,7 +84,7 @@ async def patch_communication_settings(
 @router.post("/test", response_model=CommunicationTestResponse)
 async def trigger_communication_test(
     payload: CommunicationTestPayload,
-    admin: User = Depends(require_superadmin),
+    admin: User = Depends(require_communication_tester),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -91,7 +101,7 @@ async def get_communication_history(
     page_size: int = Query(20, ge=1, le=100),
     channel: str | None = Query(None),
     status_filter: str | None = Query(None, alias="status"),
-    admin: User = Depends(require_superadmin),
+    admin: User = Depends(require_communication_tester),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -148,7 +158,7 @@ async def get_communication_history(
 @router.get("/audit-logs", response_model=list[CommunicationAuditLogItem])
 async def get_communication_audit_logs(
     limit: int = Query(50, ge=1, le=100),
-    admin: User = Depends(require_superadmin),
+    admin: User = Depends(require_communication_tester),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -220,7 +230,7 @@ async def trigger_engine_cycle(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Triggers an immediate cycle of the ProgressRooms notification engine:
+    Triggers an immediate cycle of the Progress Rooms notification engine:
     1. Dispatches all due class reminders (REMINDER_2H, REMINDER_15M).
     2. Processes any expired 2-minute debounced material schedule corrections.
     3. Evaluates studio subscription billing due dates and stops pending reminders if already paid.

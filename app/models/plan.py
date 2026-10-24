@@ -45,6 +45,8 @@ class OrganizationSubscription(Base, TimestampMixin):
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payment_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
     provider_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    saas_managed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    trial_grace_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     organization: Mapped["Organization"] = relationship(back_populates="subscription")
     plan: Mapped["Plan"] = relationship(back_populates="subscriptions")

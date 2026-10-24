@@ -47,6 +47,10 @@ async def test_pass_purchase_snapshot_idempotency_shared_credits(store, db_sessi
     response=await client.post('/commerce/orders',json={'tier_id':str(tier.id)},headers=auth(user))
     assert response.status_code==200,response.text
     order=response.json(); assert order['amount']==250
+    assert 'refunds_supported' not in order['purchase_policy']
+    assert order['purchase_policy']['version'] == '2026-10-21'
+    assert 'support' not in order['purchase_policy']
+    assert 'refund' not in order['purchase_policy']['terms'].lower()
     tier.price=999; tier.total_classes=99; await db_session.commit()
     body={'order_id':order['order_id'],'razorpay_order_id':order['razorpay_order_id'],
           'razorpay_payment_id':f"dev_{order['order_id'].replace('-','')}",'razorpay_signature':'development-only'}

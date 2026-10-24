@@ -475,7 +475,9 @@ async def test_public_session_buying_information(client, db_session):
     assert data["next_occurrence"]["id"] == str(occ.id)
     assert data["availability"]["capacity"] == 20
     assert data["availability"]["remaining_spots"] == 20
-    assert "Free cancellation" in data["cancellation_terms"]
+    assert "no payment is returned" in data["cancellation_terms"]
+    assert data["purchase_policy"]["refunds_supported"] is False
+    assert "non-refundable" in data["purchase_policy"]["terms"]
     assert "Zoom video room" in data["meeting_readiness"]
     assert "No auto-recurring" in data["renewal_terms"]
 

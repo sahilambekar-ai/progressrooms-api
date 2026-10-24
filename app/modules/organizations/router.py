@@ -3,7 +3,7 @@ import random
 import secrets
 import uuid
 from datetime import datetime, timezone
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -11,11 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.organization import Organization, OrganizationMember, OrganizationSetting
 from app.models.integration import OrganizationIntegration
+from app.modules.teachers.codes import generate_teacher_code
 from app.models.user import User
 from app.modules.auth.dependencies import get_current_user
 from app.modules.organizations.dependencies import get_current_tenant_member, require_org_role
 from app.common.enums import UserRole
-from app.modules.organizations.zoom_service import ZoomService, ZoomAuthError
+from app.modules.zoom.router import DefaultsRequest, get_defaults, save_defaults
+from app.modules.zoom import service as zoom_accounts
 
 router = APIRouter(prefix="/organizations", tags=["Organizations"])
 
@@ -43,7 +45,7 @@ class StudioProfileUpdate(BaseModel):
     phone: str | None = None
     whatsapp_number: str | None = None
     support_email: str | None = None
-    studio_tagline: str | None = None
+    studio_tagline: str | None = Field(default=None, max_length=5000)
     disciplines: str | None = None
     teaching_mode: str | None = None
     address_line1: str | None = None
@@ -67,9 +69,39 @@ class StudioProfileUpdate(BaseModel):
     zoom_auto_meeting_enabled: bool | None = None
     zoom_waiting_room: bool | None = None
     zoom_host_video: bool | None = None
+    zoom_enforce_basic_login: bool | None = None
+    zoom_enforce_zoom_login: bool | None = None
+    zoom_group_allow_self_buy_subscriptions: bool | None = None
+    zoom_group_active_subscription_required: bool | None = None
+    zoom_group_confirm_checkin_everytime: bool | None = None
+    zoom_personal_allow_self_buy_subscriptions: bool | None = None
+    zoom_personal_active_subscription_required: bool | None = None
+    zoom_personal_confirm_checkin_everytime: bool | None = None
+    zoom_personal_no_show_penalty: bool | None = None
+    zoom_join_before_host: bool | None = None
+    zoom_cloud_recording_mode: str | None = None
+    zoom_host_key: str | None = None
     account_completed: bool | None = None
     completion_step: int | None = None
     completion_percentage: int | None = None
+
+class ZoomSettingsUpdateRequest(BaseModel):
+    enforce_basic_login: bool | None = None
+    enforce_zoom_login: bool | None = None
+    waiting_room: bool | None = None
+    group_allow_self_buy_subscriptions: bool | None = None
+    group_active_subscription_required: bool | None = None
+    group_confirm_checkin_everytime: bool | None = None
+    personal_allow_self_buy_subscriptions: bool | None = None
+    personal_active_subscription_required: bool | None = None
+    personal_confirm_checkin_everytime: bool | None = None
+    personal_no_show_penalty: bool | None = None
+    join_before_host: bool | None = None
+    cloud_recording_mode: str | None = None
+    host_key: str | None = None
+
+class ZoomHostKeyUpdateRequest(BaseModel):
+    host_key: str = Field(pattern=r"^\d{6}$")
 
 class ZoomConnectRequest(BaseModel):
     account_email: str | None = None
@@ -95,7 +127,7 @@ def mask_account_number(acc: str | None) -> str | None:
         return acc_clean
     return f"{'•' * (len(acc_clean) - 4)}{acc_clean[-4:]}"
 
-def compute_completion_percentage(settings: OrganizationSetting, org: Organization) -> int:
+def compute_completion_percentage(settings: OrganizationSetting, org: Organization, zoom_ready: bool = False) -> int:
     if settings.account_completed:
         return 100
     score = 0
@@ -103,16 +135,14 @@ def compute_completion_percentage(settings: OrganizationSetting, org: Organizati
     if (org.name and org.name.strip()) and (settings.phone and settings.phone.strip()):
         score += 17
     # Step 2: Location (17%)
-    if settings.address_line1 and settings.city and settings.state and settings.pincode:
-        score += 17
+    score += 17  # Location is optional.
     # Step 3: Legal / GST (16%)
-    if settings.legal_business_name and (not settings.has_gst or (settings.has_gst and settings.gst_number)):
-        score += 16
+    score += 16  # Tax details are optional.
     # Step 4: Bank Payouts (17%)
     if settings.bank_name and settings.account_holder_name and settings.account_number_enc and settings.ifsc_code:
         score += 17
     # Step 5: Zoom Video (17%)
-    if settings.zoom_connected and settings.zoom_account_email:
+    if zoom_ready:
         score += 17
     # Step 6: Full Launch Review
     if settings.completion_step >= 6 and settings.account_completed:
@@ -148,6 +178,8 @@ async def create_organization(
         user_id=current_user.id,
         role=UserRole.OWNER.value,
         title="Founder / Owner",
+        can_teach=True,
+        teacher_code=await generate_teacher_code(db),
         is_active=True
     )
     db.add(member)
@@ -156,6 +188,8 @@ async def create_organization(
     settings = OrganizationSetting(organization_id=org.id)
     db.add(settings)
 
+    from app.modules.billing.saas import initialize_subscription
+    await initialize_subscription(db, org.id, verified=True)
     await db.commit()
     await db.refresh(org)
 
@@ -237,15 +271,16 @@ async def get_studio_profile(
         await db.commit()
         await db.refresh(settings)
 
-    # Check active zoom integration
-    zoom_stmt = select(OrganizationIntegration).where(
-        OrganizationIntegration.organization_id == org_id,
-        OrganizationIntegration.provider == "ZOOM",
-        OrganizationIntegration.is_active == True
-    )
-    zoom_int = (await db.execute(zoom_stmt)).scalar_one_or_none()
+    zoom = await get_defaults(db, org_id)
+    from app.modules.zoom import service as zoom_service
+    initial_zoom = await zoom_service.connection_for(db, membership.id) if membership else None
+    try:
+        initial_zoom_ready = await zoom_service.eligible(db, initial_zoom)
+    except HTTPException:
+        initial_zoom_ready = False
 
-    comp_pct = 100 if settings.account_completed else (settings.completion_percentage or compute_completion_percentage(settings, org))
+
+    comp_pct = 100 if settings.account_completed else (settings.completion_percentage or compute_completion_percentage(settings, org, initial_zoom_ready))
 
     return {
         "organization_id": str(org.id),
@@ -272,12 +307,26 @@ async def get_studio_profile(
         "account_number_masked": mask_account_number(settings.account_number_enc),
         "ifsc_code": settings.ifsc_code,
         "upi_id": settings.upi_id,
-        "settlement_cycle": settings.settlement_cycle,
-        "zoom_connected": settings.zoom_connected or (zoom_int is not None),
-        "zoom_account_email": settings.zoom_account_email,
+        "settlement_cycle": "MONTHLY",
+        "zoom_connected": initial_zoom_ready,
+        "zoom_provider_mode": zoom["provider_mode"],
+        "zoom_production_ready": zoom["production_ready"],
+        "zoom_account_email": initial_zoom.email if initial_zoom_ready else None,
         "zoom_auto_meeting_enabled": settings.zoom_auto_meeting_enabled,
         "zoom_waiting_room": settings.zoom_waiting_room,
         "zoom_host_video": settings.zoom_host_video,
+        "zoom_enforce_basic_login": settings.zoom_enforce_basic_login,
+        "zoom_enforce_zoom_login": settings.zoom_enforce_zoom_login,
+        "zoom_group_allow_self_buy_subscriptions": settings.zoom_group_allow_self_buy_subscriptions,
+        "zoom_group_active_subscription_required": settings.zoom_group_active_subscription_required,
+        "zoom_group_confirm_checkin_everytime": settings.zoom_group_confirm_checkin_everytime,
+        "zoom_personal_allow_self_buy_subscriptions": settings.zoom_personal_allow_self_buy_subscriptions,
+        "zoom_personal_active_subscription_required": settings.zoom_personal_active_subscription_required,
+        "zoom_personal_confirm_checkin_everytime": settings.zoom_personal_confirm_checkin_everytime,
+        "zoom_personal_no_show_penalty": settings.zoom_personal_no_show_penalty,
+        "zoom_join_before_host": settings.zoom_join_before_host,
+        "zoom_cloud_recording_mode": settings.zoom_cloud_recording_mode,
+        "zoom_host_key": None,
         "account_completed": settings.account_completed,
         "completion_step": settings.completion_step,
         "completion_percentage": comp_pct,
@@ -350,22 +399,24 @@ async def update_studio_profile(
     if payload.upi_id is not None:
         settings.upi_id = payload.upi_id.strip().lower()
     if payload.settlement_cycle is not None:
-        settings.settlement_cycle = payload.settlement_cycle
-    if payload.zoom_connected is not None:
-        settings.zoom_connected = payload.zoom_connected
-    if payload.zoom_account_email is not None:
-        settings.zoom_account_email = payload.zoom_account_email.strip().lower()
-    if payload.zoom_auto_meeting_enabled is not None:
-        settings.zoom_auto_meeting_enabled = payload.zoom_auto_meeting_enabled
-    if payload.zoom_waiting_room is not None:
-        settings.zoom_waiting_room = payload.zoom_waiting_room
-    if payload.zoom_host_video is not None:
-        settings.zoom_host_video = payload.zoom_host_video
+        settings.settlement_cycle = "MONTHLY"
+    # Connection identity and meeting defaults are managed only through their dedicated APIs.
+    if any(key.startswith("zoom_") for key in payload.model_fields_set):
+        raise HTTPException(422, "Use Zoom Settings and teacher authorization to change Zoom configuration")
+
     if payload.account_completed is not None:
-        settings.account_completed = payload.account_completed
         if payload.account_completed:
+            from app.modules.zoom import service as zoom_service
+            connection = await zoom_service.connection_for(db, membership.id) if membership else None
+            try:
+                ready = await zoom_service.eligible(db, connection)
+            except HTTPException:
+                ready = False
+            if not ready:
+                raise HTTPException(422, "Authenticate your initial Zoom account before completing Studio setup")
             settings.completion_step = 6
             settings.completion_percentage = 100
+        settings.account_completed = payload.account_completed
     if payload.completion_step is not None and not settings.account_completed:
         settings.completion_step = payload.completion_step
 
@@ -373,7 +424,7 @@ async def update_studio_profile(
         settings.completion_percentage = (
             payload.completion_percentage
             if payload.completion_percentage is not None
-            else compute_completion_percentage(settings, org)
+            else compute_completion_percentage(settings, org, (await get_defaults(db, org_id))["zoom_connected"])
         )
 
     await db.commit()
@@ -386,314 +437,57 @@ async def update_studio_profile(
         "account_completed": settings.account_completed,
         "completion_step": settings.completion_step,
         "completion_percentage": settings.completion_percentage,
-        "zoom_connected": settings.zoom_connected,
+        "zoom_connected": (await get_defaults(db, org_id))["zoom_connected"],
         "whatsapp_number": settings.whatsapp_number
     }
 
 @router.post("/{org_id}/zoom/connect")
-async def connect_zoom(
-    org_id: uuid.UUID,
-    payload: ZoomConnectRequest,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.STUDIO])),
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    org, _ = tenant
-    account_email = (payload.account_email or current_user.email).strip().lower()
+async def connect_zoom(org_id: uuid.UUID, payload: ZoomConnectRequest,
+    tenant=Depends(require_org_role([UserRole.STUDIO])), current_user=Depends(get_current_user), db=Depends(get_db)):
+    raise HTTPException(410, "Connect individual teacher accounts through Zoom Settings; manual S2S credentials are retired")
 
-    stmt = select(OrganizationIntegration).where(
-        OrganizationIntegration.organization_id == org_id,
-        OrganizationIntegration.provider == "ZOOM"
-    )
-    res = await db.execute(stmt)
-    integration = res.scalar_one_or_none()
 
-    if payload.is_dev_simulation:
-        cred_payload = {
-            "email": account_email,
-            "account_id": payload.account_id or f"sim_acc_{uuid.uuid4().hex[:8]}",
-            "connected_at": datetime.now(timezone.utc).isoformat(),
-            "mode": "DEV_SIMULATION",
-            "is_simulated": True,
-            "note": "Simulated local connection for development. Real Zoom API calls are bypassed."
-        }
-    else:
-        # Real provider connection requires Account ID, Client ID, and Client Secret
-        if not (payload.account_id and payload.client_id and payload.client_secret):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Real Zoom connection requires Account ID, Client ID, and Client Secret from your Zoom Server-to-Server OAuth app. In development, you may enable simulation mode to test without credentials."
-            )
-        try:
-            token_data = await ZoomService.verify_and_obtain_token(
-                account_id=payload.account_id.strip(),
-                client_id=payload.client_id.strip(),
-                client_secret=payload.client_secret.strip()
-            )
-        except ZoomAuthError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.message)
+@router.get("/{org_id}/zoom/settings")
+async def get_zoom_settings(org_id: uuid.UUID, tenant=Depends(require_org_role([UserRole.STUDIO])), db=Depends(get_db)):
+    return await get_defaults(db, org_id)
 
-        cred_payload = {
-            "email": account_email,
-            "account_id": payload.account_id.strip(),
-            "client_id": payload.client_id.strip(),
-            "client_secret": payload.client_secret.strip(),
-            "connected_at": datetime.now(timezone.utc).isoformat(),
-            "mode": "SERVER_TO_SERVER_OAUTH",
-            "is_simulated": False
-        }
 
-    if not integration:
-        integration = OrganizationIntegration(
-            organization_id=org_id,
-            provider="ZOOM",
-            credentials_enc=json.dumps(cred_payload),
-            is_active=True
-        )
-        db.add(integration)
-    else:
-        integration.credentials_enc = json.dumps(cred_payload)
-        integration.is_active = True
+@router.put("/{org_id}/zoom/settings")
+async def update_zoom_settings(org_id: uuid.UUID, payload: DefaultsRequest,
+    tenant=Depends(require_org_role([UserRole.STUDIO])), db=Depends(get_db)):
+    return await save_defaults(db, org_id, payload)
 
-    set_stmt = select(OrganizationSetting).where(OrganizationSetting.organization_id == org_id)
-    settings = (await db.execute(set_stmt)).scalar_one_or_none()
-    if not settings:
-        settings = OrganizationSetting(organization_id=org_id)
-        db.add(settings)
 
-    settings.zoom_connected = True
-    settings.zoom_account_email = account_email
-    settings.zoom_auto_meeting_enabled = payload.auto_meeting_enabled
-    settings.zoom_waiting_room = payload.waiting_room
-    settings.zoom_host_video = payload.host_video
-
+@router.put("/{org_id}/zoom/host-key")
+async def update_zoom_host_key(org_id: uuid.UUID, payload: ZoomHostKeyUpdateRequest,
+    tenant=Depends(require_org_role([UserRole.STUDIO])), db=Depends(get_db)):
+    from app.modules.zoom import service as zoom_service
+    from app.modules.zoom.provider import seal
+    _, member = tenant
+    connection = await zoom_service.connection_for(db, member.id) if member else None
+    if not await zoom_service.eligible(db, connection):
+        raise HTTPException(422, "Authenticate the Studio Zoom account before saving its host key")
+    connection.host_key_enc = seal({"host_key": payload.host_key, "zoom_user_id": connection.zoom_user_id})
     await db.commit()
+    return {"host_key_configured": True, "email": connection.email}
 
-    provider_label = "DEV_SIMULATION" if payload.is_dev_simulation else "ZOOM"
-    msg = (
-        f"[DEV_SIMULATION] Simulated Zoom provider connected for local testing ({account_email}). Real Zoom calls are bypassed."
-        if payload.is_dev_simulation
-        else f"Zoom account ({account_email}) successfully authenticated with provider."
-    )
 
-    return {
-        "status": "connected",
-        "provider": provider_label,
-        "is_simulated": payload.is_dev_simulation,
-        "account_email": account_email,
-        "auto_meeting_enabled": settings.zoom_auto_meeting_enabled,
-        "message": msg
-    }
+@router.get("/{org_id}/zoom/host-key")
+async def get_zoom_host_key_status(org_id: uuid.UUID,
+    tenant=Depends(require_org_role([UserRole.STUDIO])), db=Depends(get_db)):
+    from app.modules.zoom import service as zoom_service
+    _, member = tenant
+    connection = await zoom_service.connection_for(db, member.id) if member else None
+    return {"host_key_configured": bool(connection and connection.host_key_enc),
+            "email": connection.email if connection else None}
+
 
 @router.post("/{org_id}/zoom/disconnect")
-async def disconnect_zoom(
-    org_id: uuid.UUID,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.STUDIO])),
-    db: AsyncSession = Depends(get_db)
-):
-    stmt = select(OrganizationIntegration).where(
-        OrganizationIntegration.organization_id == org_id,
-        OrganizationIntegration.provider == "ZOOM"
-    )
-    res = await db.execute(stmt)
-    integration = res.scalar_one_or_none()
-    if integration:
-        integration.is_active = False
+async def disconnect_zoom(org_id: uuid.UUID, tenant=Depends(require_org_role([UserRole.STUDIO])), db=Depends(get_db)):
+    raise HTTPException(410, "Disconnect the intended teacher connection after reviewing its class impact in Zoom Settings")
 
-    set_stmt = select(OrganizationSetting).where(OrganizationSetting.organization_id == org_id)
-    settings = (await db.execute(set_stmt)).scalar_one_or_none()
-    if settings:
-        settings.zoom_connected = False
-
-    await db.commit()
-    return {"status": "disconnected", "message": "Zoom account disconnected."}
 
 @router.post("/{org_id}/zoom/generate-meeting")
-async def generate_zoom_meeting(
-    org_id: uuid.UUID,
-    payload: ZoomMeetingGenerateRequest,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.STUDIO])),
-    db: AsyncSession = Depends(get_db)
-):
-    org, _ = tenant
-    set_stmt = select(OrganizationSetting).where(OrganizationSetting.organization_id == org_id)
-    settings = (await db.execute(set_stmt)).scalar_one_or_none()
-
-    if not settings or not settings.zoom_connected:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Zoom is Not Connected. You must connect Zoom before generating test meetings."
-        )
-
-    stmt = select(OrganizationIntegration).where(
-        OrganizationIntegration.organization_id == org_id,
-        OrganizationIntegration.provider == "ZOOM",
-        OrganizationIntegration.is_active.is_(True)
-    )
-    integration = (await db.execute(stmt)).scalar_one_or_none()
-    if not integration or not integration.credentials_enc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Zoom credentials not found. Please reconnect Zoom."
-        )
-
-    try:
-        cred_data = json.loads(integration.credentials_enc)
-    except Exception:
-        cred_data = {}
-
-    is_simulated = cred_data.get("is_simulated", False) or cred_data.get("mode") == "DEV_SIMULATION"
-
-    if is_simulated:
-        sim_id = f"sim_{secrets.randbelow(900_000_000) + 100_000_000}"
-        passcode = secrets.token_urlsafe(6)
-        join_url = f"https://dev-simulation.zoom.us/j/{sim_id}?pwd={passcode}"
-        start_url = f"https://dev-simulation.zoom.us/s/{sim_id}?zak=sim_zak_{secrets.token_hex(8)}"
-
-        return {
-            "provider": "DEV_SIMULATION",
-            "is_simulated": True,
-            "meeting_id": sim_id,
-            "passcode": passcode,
-            "join_url": join_url,
-            "start_url": start_url,
-            "topic": payload.topic,
-            "timezone": payload.timezone or org.timezone,
-            "duration_minutes": payload.duration_minutes,
-            "waiting_room": settings.zoom_waiting_room if settings else True,
-            "host_video": settings.zoom_host_video if settings else True,
-            "message": "[DEV_SIMULATION] Sample meeting generated for local development."
-        }
-
-    # Real Zoom Meeting Generation
-    account_id = cred_data.get("account_id")
-    client_id = cred_data.get("client_id")
-    client_secret = cred_data.get("client_secret")
-
-    if not (account_id and client_id and client_secret):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Incomplete Zoom credentials: Account ID, Client ID, and Client Secret are required."
-        )
-
-    try:
-        token_info = await ZoomService.verify_and_obtain_token(account_id, client_id, client_secret)
-        meeting = await ZoomService.create_meeting(
-            access_token=token_info["access_token"],
-            topic=payload.topic,
-            start_time=datetime.now(timezone.utc),
-            duration_minutes=payload.duration_minutes,
-            timezone_str=payload.timezone or org.timezone,
-            waiting_room=settings.zoom_waiting_room if settings else True,
-            host_video=settings.zoom_host_video if settings else True,
-            host_email=settings.zoom_account_email or "me"
-        )
-    except ZoomAuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
-
-    return {
-        "provider": "ZOOM",
-        "is_simulated": False,
-        "meeting_id": meeting["meeting_id"],
-        "passcode": meeting["passcode"],
-        "join_url": meeting["join_url"],
-        "start_url": meeting["start_url"],
-        "topic": payload.topic,
-        "timezone": payload.timezone or org.timezone,
-        "duration_minutes": payload.duration_minutes,
-        "waiting_room": settings.zoom_waiting_room if settings else True,
-        "host_video": settings.zoom_host_video if settings else True,
-        "message": "Live Zoom meeting room provisioned successfully."
-    }
-
-
-@router.get("/{org_id}/analytics")
-async def get_studio_analytics(
-    org_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
-    tenant=Depends(require_org_role([UserRole.STUDIO])),
-    db: AsyncSession = Depends(get_db)
-):
-    from sqlalchemy import func
-    from app.models.commerce import SessionEnrollment, Order, Payment
-    from app.models.session import Session, SessionPricing
-    from app.models.support import SupportTicket
-    from app.models.membership_tier import MembershipTier
-
-    # 1. Active enrolled students: DISTINCT user_id with an ACTIVE SessionEnrollment in this studio
-    active_students_count = await db.scalar(
-        select(func.count(func.distinct(SessionEnrollment.user_id)))
-        .where(
-            SessionEnrollment.organization_id == org_id,
-            SessionEnrollment.status == "ACTIVE"
-        )
-    ) or 0
-
-    # 2. Active recurring batches: configured active sessions in this studio
-    active_batches_count = await db.scalar(
-        select(func.count(Session.id))
-        .where(
-            Session.organization_id == org_id,
-            Session.is_active == True,
-            Session.deleted_at.is_(None)
-        )
-    ) or 0
-
-    # 3. Total support tickets in this studio
-    support_tickets_count = await db.scalar(
-        select(func.count(SupportTicket.id))
-        .where(SupportTicket.organization_id == org_id)
-    ) or 0
-
-    # 4. Projected subscription value from active class batches and passes
-    classes_pricing_sum = await db.scalar(
-        select(func.sum(SessionPricing.price))
-        .join(Session, Session.id == SessionPricing.session_id)
-        .where(
-            Session.organization_id == org_id,
-            Session.is_active == True,
-            Session.deleted_at.is_(None)
-        )
-    ) or 0
-
-    passes_pricing_sum = await db.scalar(
-        select(func.sum(MembershipTier.price))
-        .where(
-            MembershipTier.organization_id == org_id,
-            MembershipTier.is_active == True,
-            MembershipTier.deleted_at.is_(None)
-        )
-    ) or 0
-
-    projected_subscription_value = float(classes_pricing_sum or 0) + float(passes_pricing_sum or 0)
-
-    # 5. Collected gateway revenue (Payment.status in ('SUCCESS', 'CAPTURED'))
-    collected_revenue = await db.scalar(
-        select(func.sum(Payment.amount))
-        .join(Order, Payment.order_id == Order.id)
-        .where(
-            Order.organization_id == org_id,
-            Payment.status.in_(["SUCCESS", "CAPTURED"])
-        )
-    ) or 0
-
-    # 6. Billed revenue: sum of billing_value across active enrollments
-    billed_revenue = await db.scalar(
-        select(func.sum(SessionEnrollment.billing_value))
-        .where(
-            SessionEnrollment.organization_id == org_id,
-            SessionEnrollment.status == "ACTIVE"
-        )
-    ) or 0
-
-    return {
-        "active_enrolled_students": active_students_count,
-        "active_recurring_batches": active_batches_count,
-        "total_support_queries": support_tickets_count,
-        "projected_subscription_value": projected_subscription_value,
-        "collected_revenue": float(collected_revenue),
-        "billed_revenue": float(billed_revenue),
-        "currency": tenant[0].currency or "INR",
-        "explanation": "Billed revenue reflects total scheduled subscription value across student enrollments. Collected revenue reflects actual gateway payment receipts."
-    }
-
+async def generate_zoom_meeting(org_id: uuid.UUID, payload: ZoomMeetingGenerateRequest,
+    tenant=Depends(require_org_role([UserRole.STUDIO])), db=Depends(get_db)):
+    raise HTTPException(410, "Use a scheduled class to test Zoom; meetings require a saved class host and audit history")

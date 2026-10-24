@@ -9,16 +9,16 @@ BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 def _generate_otp_email_html(otp_code: str, recipient_name: str, purpose_display: str) -> str:
     """
     Renders an elegant, responsive HTML email template styled with
-    the ProgressRooms nature sanctuary aesthetic.
+    the Progress Rooms nature studio aesthetic.
     """
-    first_name = recipient_name.strip().split()[0] if recipient_name else "Yogi"
+    first_name = recipient_name.strip().split()[0] if recipient_name else "Student"
     
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Your Verification Passcode - ProgressRooms</title>
+  <title>Your Verification Passcode - Progress Rooms</title>
   <style>
     body {{
       margin: 0;
@@ -144,12 +144,12 @@ def _generate_otp_email_html(otp_code: str, recipient_name: str, purpose_display
     <div class="container">
       <div class="header">
         <div class="logo-badge">🌿</div>
-        <h1 class="header-title">ProgressRooms</h1>
-        <div class="header-subtitle">Virtual Studio Sanctuary</div>
+        <h1 class="header-title">Progress Rooms</h1>
+        <div class="header-subtitle">Virtual Studio</div>
       </div>
       
       <div class="content">
-        <div class="greeting">Namaste {first_name},</div>
+        <div class="greeting">Hello {first_name},</div>
         <p class="message">
           Please use the secure one-time passcode below to complete your {purpose_display.lower()}:
         </p>
@@ -161,7 +161,7 @@ def _generate_otp_email_html(otp_code: str, recipient_name: str, purpose_display
         </div>
 
         <div class="security-callout">
-          <strong>Security Note:</strong> Do not share this OTP with anyone. ProgressRooms instructors and staff will never ask for your one-time code.
+          <strong>Security Note:</strong> Do not share this OTP with anyone. Progress Rooms instructors and staff will never ask for your one-time code.
         </div>
 
         <p class="message" style="margin-bottom: 0; font-size: 13px; color: #618D63;">
@@ -170,10 +170,10 @@ def _generate_otp_email_html(otp_code: str, recipient_name: str, purpose_display
       </div>
 
       <div class="footer">
-        <p><strong>ProgressRooms Virtual Studio OS</strong></p>
+        <p><strong>Progress Rooms Virtual Studio OS</strong></p>
         <p>Independent Teacher Sanctuaries & Scheduled Batch Classrooms</p>
         <p style="margin-top: 8px; font-size: 11px; color: #81A882;">
-          © 2026 ProgressRooms. All rights reserved.
+          © 2026 Progress Rooms. All rights reserved.
         </p>
       </div>
     </div>
@@ -206,7 +206,7 @@ async def send_otp_email(
         "LOGIN_VERIFICATION": "Login Verification"
     }
     purpose_display = purpose_labels.get(purpose, "Verification")
-    subject = f"🌿 Your ProgressRooms Code ({otp_code})"
+    subject = f"🌿 Your Progress Rooms Code ({otp_code})"
     html_content = _generate_otp_email_html(otp_code, to_name, purpose_display)
 
     headers = {
@@ -217,7 +217,7 @@ async def send_otp_email(
 
     payload = {
         "sender": {
-            "name": getattr(settings, "BREVO_SENDER_NAME", "ProgressRooms"),
+            "name": getattr(settings, "BREVO_SENDER_NAME", "Progress Rooms"),
             "email": getattr(settings, "BREVO_SENDER_EMAIL", "sahilambekar.dev@gmail.com")
         },
         "to": [

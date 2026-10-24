@@ -21,11 +21,14 @@ class SchedulingEngine:
             selectinload(Session.schedule_rules),
             selectinload(Session.instructors),
             joinedload(Session.organization)
-        ).where(Session.id == session_id).with_for_update().execution_options(populate_existing=True)
+        ).where(Session.id == session_id).with_for_update(of=Session).execution_options(populate_existing=True)
         res = await db.execute(stmt)
         session = res.scalar_one_or_none()
 
         if not session or not session.schedule_rules:
+            return 0
+        from app.modules.billing.saas import operational_access
+        if not await operational_access(db, session.organization_id):
             return 0
 
         # Find primary instructor
@@ -44,6 +47,15 @@ class SchedulingEngine:
                 ClassOccurrence.scheduled_start_at < horizon_utc_end,
             )
         )).all())
+        zoom_prefs = None
+        from app.modules.zoom.provider import mode
+        from fastapi import HTTPException
+        try:
+            mode()
+            from app.models.organization import OrganizationSetting
+            zoom_prefs = await db.scalar(select(OrganizationSetting).where(OrganizationSetting.organization_id == session.organization_id))
+        except HTTPException:
+            pass
         created_count = 0
 
         for rule in session.schedule_rules:
@@ -91,6 +103,16 @@ class SchedulingEngine:
                         )
                         db.add(occ)
                         await db.flush()
+                        # A studio fallback host may be shared by different teachers.
+                        if zoom_prefs and zoom_prefs.zoom_auto_meeting_enabled and not session.meeting_url:
+                            from app.modules.zoom.meetings import host_for_occurrence, check_conflicts
+                            from fastapi import HTTPException
+                            try:
+                                host = await host_for_occurrence(db, occ)
+                            except HTTPException:
+                                host = None  # Optional Zoom readiness must not prevent teacher/class setup.
+                            if host:
+                                await check_conflicts(db, occ, host)
                         from app.modules.communication.reminder_engine import sync_reminder_schedules_for_occurrence
                         await sync_reminder_schedules_for_occurrence(
                             db=db,
@@ -115,11 +137,39 @@ class SchedulingEngine:
         """Returns True if instructor has a conflicting scheduled occurrence."""
         stmt = select(ClassOccurrence.id).where(
             ClassOccurrence.instructor_id == instructor_id,
-            ClassOccurrence.status.in_([OccurrenceStatus.SCHEDULED.value, OccurrenceStatus.IN_PROGRESS.value]),
+            ClassOccurrence.status.in_([OccurrenceStatus.SCHEDULED.value, OccurrenceStatus.RESCHEDULED.value, OccurrenceStatus.IN_PROGRESS.value]),
             ClassOccurrence.actual_start_at < end_at,
             ClassOccurrence.actual_end_at > start_at
         )
         if exclude_occurrence_id:
             stmt = stmt.where(ClassOccurrence.id != exclude_occurrence_id)
 
-        return await db.scalar(stmt.limit(1)) is not None
+        if await db.scalar(stmt.limit(1)) is not None:
+            return True
+        from app.models.organization import OrganizationMember, OrganizationSetting
+        from app.modules.zoom.service import resolve_host
+        from app.modules.zoom.meetings import host_for_occurrence
+        from fastapi import HTTPException
+        member = await db.get(OrganizationMember, instructor_id)
+        if not member:
+            return False
+        prefs = await db.scalar(select(OrganizationSetting).where(OrganizationSetting.organization_id == member.organization_id))
+        if not prefs or not prefs.zoom_auto_meeting_enabled:
+            return False
+        try:
+            host = await resolve_host(db, member.organization_id, instructor_id)
+        except HTTPException:
+            return False
+        candidates = select(ClassOccurrence).where(ClassOccurrence.organization_id == member.organization_id,
+            ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED", "IN_PROGRESS"]),
+            ClassOccurrence.actual_start_at < end_at, ClassOccurrence.actual_end_at > start_at)
+        if exclude_occurrence_id:
+            candidates = candidates.where(ClassOccurrence.id != exclude_occurrence_id)
+        for candidate in (await db.scalars(candidates)).all():
+            try:
+                other = await host_for_occurrence(db, candidate)
+                if other.id == host.id:
+                    return True
+            except HTTPException:
+                pass
+        return False

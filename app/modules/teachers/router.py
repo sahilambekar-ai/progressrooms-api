@@ -8,6 +8,9 @@ from sqlalchemy import select, or_, update, func, asc, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_password_hash
+from app.modules.teachers.credentials import reconfirm, seal, reveal
+from app.modules.teachers.codes import generate_teacher_code
+from app.modules.teachers.service import protect_teaching_roster
 from app.models.organization import OrganizationMember
 from app.models.user import User
 from app.models.session import Session, SessionInstructor
@@ -17,6 +20,7 @@ from app.modules.organizations.dependencies import resolve_staff_studio
 router = APIRouter(prefix="/teachers", tags=["Studio Teachers Management"])
 
 class TeacherCreateRequest(BaseModel):
+    billing_country: str | None = Field(None, pattern=r"^[A-Z]{2}$")
     name: str = Field(min_length=1, max_length=255)
     email: EmailStr
     username: str | None = Field(None, min_length=3, max_length=100, pattern=r"^[a-zA-Z0-9_.-]+$")
@@ -29,6 +33,8 @@ class TeacherCreateRequest(BaseModel):
     studio_id: uuid.UUID | None = None
 
 class TeacherUpdateRequest(BaseModel):
+    billing_country: str | None = Field(None, pattern=r"^[A-Z]{2}$")
+    studio_password: str = Field(default="", max_length=128)
     name: str | None = Field(None, min_length=1, max_length=255)
     email: EmailStr | None = None
     username: str | None = Field(None, min_length=3, max_length=100, pattern=r"^[a-zA-Z0-9_.-]+$")
@@ -43,18 +49,12 @@ class TeacherUpdateRequest(BaseModel):
 
 def serialize(member, user, org):
     return dict(id=str(member.id), user_id=str(user.id), name=user.full_name, email=user.email,
-                username=user.username, phone=user.phone, address=user.address, location=user.location,
-                title=member.title, bio=member.bio, role=user.role, studio_id=str(org.id), studio_name=org.name,
+                username=user.username, phone=user.phone, address=user.address, location=user.location, billing_country=user.billing_country,
+                title=member.title, bio=member.bio, role=member.role,
+                is_owner=member.role == "STUDIO", can_teach=member.can_teach, studio_id=str(org.id), studio_name=org.name,
                 is_active=member.is_active, status="ACTIVE" if member.is_active else "SUSPENDED",
                 teacher_code=member.teacher_code, joined_at=member.created_at.isoformat())
 
-
-async def generate_teacher_code(db: AsyncSession) -> str:
-    for _ in range(20):
-        code = f"{secrets.randbelow(90_000_000) + 10_000_000:08d}"
-        if not await db.scalar(select(OrganizationMember.id).where(OrganizationMember.teacher_code == code)):
-            return code
-    raise HTTPException(503, "A teacher code could not be allocated. Please try again.")
 
 @router.get("/public/lookup")
 async def public_teacher_lookup(query: str = Query(..., min_length=1), db: AsyncSession = Depends(get_db)):
@@ -66,12 +66,12 @@ async def public_teacher_lookup(query: str = Query(..., min_length=1), db: Async
     user = None
     if member:
         user = await db.get(User, member.user_id)
-        if not member.is_active or (user and user.account_status != "ACTIVE"):
+        if not member.can_teach or not member.is_active or (user and user.account_status != "ACTIVE"):
             raise HTTPException(404, "Teacher account is inactive")
     else:
         # Search by teacher full name
         user = await db.scalar(
-            select(User).where(User.role == "TEACHER", User.full_name.ilike(f"%{q}%"))
+            select(User).join(OrganizationMember).where(OrganizationMember.can_teach.is_(True), OrganizationMember.is_active.is_(True), User.full_name.ilike(f"%{q}%"))
         )
         if user and user.account_status != "ACTIVE":
             raise HTTPException(404, "Teacher account is inactive")
@@ -81,14 +81,14 @@ async def public_teacher_lookup(query: str = Query(..., min_length=1), db: Async
         active_members = (await db.execute(
             select(OrganizationMember).where(
                 OrganizationMember.user_id == user.id,
-                OrganizationMember.role == "TEACHER",
+                OrganizationMember.can_teach.is_(True),
                 OrganizationMember.is_active.is_(True)
             )
         )).scalars().all()
         if not active_members:
             # Check if inactive membership exists
             has_member = await db.scalar(
-                select(OrganizationMember.id).where(OrganizationMember.user_id == user.id, OrganizationMember.role == "TEACHER")
+                select(OrganizationMember.id).where(OrganizationMember.user_id == user.id, OrganizationMember.can_teach.is_(True))
             )
             if has_member:
                 raise HTTPException(404, "Teacher account is inactive")
@@ -113,7 +113,7 @@ async def public_teacher_lookup(query: str = Query(..., min_length=1), db: Async
         .join(Organization, OrganizationMember.organization_id == Organization.id)
         .where(
             OrganizationMember.user_id == user.id,
-            OrganizationMember.role == "TEACHER",
+            OrganizationMember.can_teach.is_(True),
             OrganizationMember.is_active.is_(True),
             Organization.status == "ACTIVE",
             Organization.deleted_at.is_(None)
@@ -129,6 +129,7 @@ async def public_teacher_lookup(query: str = Query(..., min_length=1), db: Async
             .join(SessionInstructor, SessionInstructor.session_id == Session.id)
             .options(
                 selectinload(Session.pricing),
+                selectinload(Session.instructors).selectinload(SessionInstructor.member).selectinload(OrganizationMember.user),
                 selectinload(Session.schedule_rules)
             )
             .where(
@@ -149,7 +150,7 @@ async def public_teacher_lookup(query: str = Query(..., min_length=1), db: Async
                     SessionEnrollment.status == "ACTIVE"
                 )
             ) or 0
-            remaining_spots = max(0, s.capacity - enrolled_count)
+            remaining_spots = max(0, s.capacity - enrolled_count) if s.capacity is not None else None
 
             # Next session occurrence
             next_occ = await db.scalar(
@@ -165,13 +166,16 @@ async def public_teacher_lookup(query: str = Query(..., min_length=1), db: Async
                 "name": s.name,
                 "slug": s.slug,
                 "short_description": s.short_description,
+                "full_description": s.full_description,
                 "session_type": s.session_type,
                 "delivery_mode": "ONLINE_LIVE" if s.session_type in ("ONLINE", "LIVE") else "HYBRID",
                 "skill_level": s.skill_level,
                 "duration_minutes": s.duration_minutes,
+                "instructor_names": [i.member.user.full_name for i in s.instructors if i.member and i.member.user],
                 "capacity": s.capacity,
                 "remaining_spots": remaining_spots,
                 "pricing": {
+                    "packages": s.pricing.packages or [],
                     "pricing_type": s.pricing.pricing_type,
                     "price": float(s.pricing.price),
                     "currency": s.pricing.currency,
@@ -215,6 +219,7 @@ async def public_teacher_lookup(query: str = Query(..., min_length=1), db: Async
                 "offer_price": float(t.offer_price) if t.offer_price is not None else None,
                 "currency": t.currency,
                 "tier_type": t.tier_type,
+                "class_packages": t.class_packages or [],
                 "total_classes": t.total_classes,
                 "validity_days": t.validity_days or 30
             }
@@ -257,7 +262,7 @@ async def list_studio_teachers(studio_id: str | None = None, search: str | None 
                               sort_order: Literal["asc", "desc"] = "asc",
                               current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     org, _ = await resolve_staff_studio(db, current_user, studio_id, owner_only=True)
-    filters = [OrganizationMember.organization_id == org.id, OrganizationMember.role == "TEACHER"]
+    filters = [OrganizationMember.organization_id == org.id, OrganizationMember.can_teach.is_(True)]
     if search:
         filters.append(or_(User.full_name.ilike(f"%{search}%"), User.email.ilike(f"%{search}%"),
                            OrganizationMember.teacher_code.ilike(f"%{search}%")))
@@ -270,7 +275,8 @@ async def list_studio_teachers(studio_id: str | None = None, search: str | None 
     ordering = desc(sort_column) if sort_order == "desc" else asc(sort_column)
     rows = (await db.execute(stmt.order_by(ordering, OrganizationMember.id)
                              .offset((page - 1) * page_size).limit(page_size))).all()
-    return {"teachers": [serialize(m, u, org) for m, u in rows], "total": total,
+    from app.modules.zoom.service import teacher_state
+    return {"teachers": [dict(serialize(m, u, org), **await teacher_state(db, m)) for m, u in rows], "total": total,
             "active_total": active_total,
             "page": page, "page_size": page_size, "total_pages": max(1, math.ceil(total / page_size))}
 
@@ -281,19 +287,19 @@ async def create_studio_teacher(payload: TeacherCreateRequest, current_user: Use
     email = payload.email.lower().strip()
     username = payload.username.lower().strip() if payload.username else f"{email.split('@')[0]}_{secrets.token_hex(3)}"
     password = payload.password if payload.password else secrets.token_urlsafe(16)
-    phone = payload.phone or "+91 98000 00000"
-    address = payload.address or "Studio Campus"
-    location = payload.location or "Sanctuary"
+    phone = payload.phone
+    address = payload.address
+    location = payload.location
 
     if await db.scalar(select(User.id).where(or_(User.email == email, User.username == username))):
         raise HTTPException(409, "Email or username is already in use")
     user = User(email=email, username=username, full_name=payload.name.strip(), role="TEACHER",
-                password_hash=get_password_hash(password), phone=phone,
-                address=address, location=location, is_verified=True, account_status="ACTIVE")
+                password_hash=get_password_hash(password), managed_password_enc=seal(password), phone=phone,
+                address=address, location=location, billing_country=payload.billing_country, is_verified=True, account_status="ACTIVE")
     db.add(user)
     await db.flush()
     member = OrganizationMember(organization_id=org.id, user_id=user.id, role="TEACHER",
-                                title=payload.title, bio=payload.bio,
+                                title=payload.title, bio=payload.bio, can_teach=True,
                                 teacher_code=await generate_teacher_code(db))
     db.add(member)
     await db.commit()
@@ -302,7 +308,7 @@ async def create_studio_teacher(payload: TeacherCreateRequest, current_user: Use
 
 async def owned_teacher(db, user, member_id):
     row = (await db.execute(select(OrganizationMember, User).join(User).where(
-        OrganizationMember.id == member_id, OrganizationMember.role == "TEACHER"))).first()
+        OrganizationMember.id == member_id, OrganizationMember.can_teach.is_(True)))).first()
     if not row:
         raise HTTPException(404, "Teacher not found")
     org, _ = await resolve_staff_studio(db, user, row[0].organization_id, owner_only=True)
@@ -312,16 +318,20 @@ async def owned_teacher(db, user, member_id):
 async def update_studio_teacher(member_id: uuid.UUID, payload: TeacherUpdateRequest,
                                 current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     member, user, org = await owned_teacher(db, current_user, member_id)
-    values = payload.model_dump(exclude_unset=True, exclude_none=True)
+    reconfirm(current_user, payload.studio_password)
+    values = payload.model_dump(exclude_unset=True, exclude_none=True, exclude={"studio_password"})
     for key in ("email", "username"):
         if key in values:
             values[key] = values[key].lower()
             if await db.scalar(select(User.id).where(getattr(User, key) == values[key], User.id != user.id)):
                 raise HTTPException(409, f"{key.title()} is already in use")
+    if values.get("is_active") is False:
+        await protect_teaching_roster(db, member)
     deactivate_assigned_classes = values.get("is_active") is False and member.is_active
     for key, value in values.items():
         if key == "password":
             user.password_hash = get_password_hash(value)
+            user.managed_password_enc = seal(value)
         elif key == "name":
             user.full_name = value.strip()
         elif key in {"title", "bio", "is_active"}:
@@ -330,6 +340,8 @@ async def update_studio_teacher(member_id: uuid.UUID, payload: TeacherUpdateRequ
             setattr(user, key, value)
     deactivated_class_count = 0
     if deactivate_assigned_classes:
+        from app.modules.zoom.service import disconnect
+        await disconnect(db, member, pause_confirmed=True, commit=False)
         deactivated = await db.execute(
             update(Session)
             .where(Session.id.in_(select(SessionInstructor.session_id).where(SessionInstructor.member_id == member.id)),
@@ -340,13 +352,22 @@ async def update_studio_teacher(member_id: uuid.UUID, payload: TeacherUpdateRequ
     await db.commit()
     result = serialize(member, user, org)
     result["deactivated_class_count"] = deactivated_class_count
+    if user.teacher_invitation_fingerprint:
+        try:
+            delivery = await invite_teacher(member_id, CredentialRequest(studio_password=payload.studio_password), current_user, db)
+            result["invitation_message"] = delivery["message"]
+        except HTTPException as exc:
+            result["invitation_message"] = f"Teacher saved. {exc.detail}"
     return result
 
 @router.delete("/{member_id}")
 async def remove_studio_teacher(member_id: uuid.UUID, current_user: User = Depends(get_current_user),
                                 db: AsyncSession = Depends(get_db)):
     member, user, org = await owned_teacher(db, current_user, member_id)
+    await protect_teaching_roster(db, member)
     was_active = member.is_active
+    from app.modules.zoom.service import disconnect
+    await disconnect(db, member, pause_confirmed=True, commit=False)
     member.is_active = False
     if was_active:
         await db.execute(
@@ -357,3 +378,52 @@ async def remove_studio_teacher(member_id: uuid.UUID, current_user: User = Depen
         )
     await db.commit()
     return {"message": "Teacher access and assigned classes deactivated; attendance history retained"}
+
+
+class CredentialRequest(BaseModel):
+    studio_password: str = Field(min_length=1, max_length=128)
+
+@router.post("/{member_id}/password")
+async def teacher_password(member_id: uuid.UUID, payload: CredentialRequest,
+                           current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    from fastapi.responses import JSONResponse
+    _, user, _ = await owned_teacher(db, current_user, member_id)
+    reconfirm(current_user, payload.studio_password)
+    return JSONResponse({"password": reveal(user)}, headers={"Cache-Control": "no-store"})
+
+@router.post("/{member_id}/invitation")
+async def invite_teacher(member_id: uuid.UUID, payload: CredentialRequest,
+                         current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    import hashlib
+    import json
+    from html import escape
+    import httpx
+    from app.core.config import settings
+    from app.core.email_service import BREVO_API_URL
+    member, user, org = await owned_teacher(db, current_user, member_id)
+    reconfirm(current_user, payload.studio_password)
+    # Lock across dispatch so repeated clicks cannot send duplicate invitations.
+    user = await db.scalar(select(User).where(User.id == user.id).with_for_update())
+    details = serialize(member, user, org)
+    details["password"] = reveal(user)
+    fingerprint = hashlib.sha256(json.dumps(details, sort_keys=True).encode()).hexdigest()
+    if user.teacher_invitation_fingerprint == fingerprint:
+        return {"message": "Invitation already sent; no teacher details have changed"}
+    if not settings.BREVO_ENABLED or not settings.BREVO_API_KEY:
+        raise HTTPException(503, "Email delivery is not configured; teacher saved, invitation not sent")
+    content = "<h2>Your Studio teacher account</h2>" + "".join(
+        f"<p><b>{escape(k.replace('_', ' ').title())}:</b> {escape(str(v))}</p>"
+        for k, v in details.items() if v is not None)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(BREVO_API_URL, headers={"api-key": settings.BREVO_API_KEY}, json={
+                "sender": {"name": settings.BREVO_SENDER_NAME, "email": settings.BREVO_SENDER_EMAIL},
+                "to": [{"email": user.email, "name": user.full_name}],
+                "subject": f"Your teacher account at {org.name}", "htmlContent": content})
+        if response.status_code not in (200, 201):
+            raise HTTPException(502, "Teacher saved but invitation delivery failed; retry sending")
+    except httpx.RequestError:
+        raise HTTPException(502, "Invitation delivery unavailable; retry sending")
+    user.teacher_invitation_fingerprint = fingerprint
+    await db.commit()
+    return {"message": "Teacher invitation sent by email"}

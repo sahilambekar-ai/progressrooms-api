@@ -44,7 +44,7 @@ not functional while mail is disabled. Payment credentials remain placeholders
 until explicitly configured for UAT.
 
 Deployment serializes API releases, loads the image, starts/checks PostgreSQL,
-runs `alembic upgrade head` once, then replaces only the API service. Migration
+runs `alembic upgrade head` once, then replaces the API service and starts the Zoom maintenance worker. The worker retries provider revocations and removes expired authorization candidates; it shares backend configuration and has no public port. Migration
 failure stops deployment before the API update. API uploads, exports, and data
 use persistent Docker volumes. Health checks probe `/health` (process health,
 not database readiness). CI separately checks migrations against PostgreSQL.

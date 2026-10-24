@@ -27,6 +27,8 @@ ENV/
 .env
 .env.*
 !.env.example
+!.env.zoom.example
+!.env.saas.example
 .pytest_cache/
 .coverage
 htmlcov/

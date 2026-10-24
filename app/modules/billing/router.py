@@ -25,6 +25,20 @@ router = APIRouter(prefix="/organizations/{org_id}/billing", tags=["Studio Billi
 OwnerContext = tuple[Organization, OrganizationMember | None]
 
 
+@router.get("/progressrooms")
+async def progressrooms_billing(
+    org_id: uuid.UUID,
+    month: date | None = None,
+    teacher_id: uuid.UUID | None = None,
+    tenant: OwnerContext = Depends(require_org_role([UserRole.STUDIO])),
+    db: AsyncSession = Depends(get_db),
+):
+    from .platform import dashboard
+    result = await dashboard(db, tenant[0], month, teacher_id)
+    await db.commit()
+    return result
+
+
 def _bounds(start_date: date, end_date: date) -> tuple[datetime, datetime]:
     if end_date < start_date:
         raise HTTPException(422, "End date must be on or after start date")

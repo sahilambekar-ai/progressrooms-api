@@ -1,4 +1,4 @@
-"""Initial ProgressRooms Schema
+"""Initial Progress Rooms Schema
 
 Revision ID: 001_initial_schema
 Revises: 

@@ -150,7 +150,7 @@ async def setup_billing_test_data(db_session):
 @pytest.mark.asyncio
 async def test_student_payment_received_notification(db_session):
     """
-    Verifies that successful payment triggers notifications via ProgressRooms Admin WhatsApp
+    Verifies that successful payment triggers notifications via Progress Rooms Admin WhatsApp
     and Brevo email, properly identifying studio and student.
     """
     org, owner, student, order, payment = await setup_billing_test_data(db_session)

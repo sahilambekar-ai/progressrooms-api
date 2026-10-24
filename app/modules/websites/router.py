@@ -1,3 +1,4 @@
+from app.common.purchase_policy import BOOKING_CANCELLATION_TERMS, purchase_policy
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile
 from datetime import datetime, timezone
@@ -145,6 +146,9 @@ async def get_public_organization_website(org_slug: str, db: AsyncSession = Depe
     if not org:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Teacher or Studio not found")
 
+    from app.modules.billing.saas import require_operational_access
+    await require_operational_access(db, org.id)
+
     from app.models.commerce import SessionEnrollment
     active_public_sessions = [s for s in org.sessions if s.is_public and s.is_active and s.deleted_at is None]
     public_sessions = []
@@ -155,13 +159,14 @@ async def get_public_organization_website(org_slug: str, db: AsyncSession = Depe
                 SessionEnrollment.status == "ACTIVE"
             )
         ) or 0
-        remaining_spots = max(0, s.capacity - enrolled_count)
+        remaining_spots = max(0, s.capacity - enrolled_count) if s.capacity is not None else None
         primary_instructor = s.instructors[0].member.user.full_name if s.instructors and s.instructors[0].member and s.instructors[0].member.user else None
         public_sessions.append({
             "id": str(s.id),
             "name": s.name,
             "slug": s.slug,
             "short_description": s.short_description,
+                "full_description": s.full_description,
             "session_type": s.session_type,
             "delivery_mode": "ONLINE_LIVE" if s.session_type in ("ONLINE", "LIVE") else "HYBRID",
             "skill_level": s.skill_level,
@@ -169,8 +174,10 @@ async def get_public_organization_website(org_slug: str, db: AsyncSession = Depe
             "capacity": s.capacity,
             "remaining_spots": remaining_spots,
             "instructor_name": primary_instructor,
+            "instructor_names": [i.member.user.full_name for i in s.instructors if i.member and i.member.user],
             "pricing": {
-                "pricing_type": s.pricing.pricing_type,
+                "packages": s.pricing.packages or [],
+                    "pricing_type": s.pricing.pricing_type,
                 "price": float(s.pricing.price),
                 "currency": s.pricing.currency,
                 "total_classes": s.pricing.total_classes if s.pricing.total_classes is not None else (1 if s.pricing.pricing_type in ("ONE_TIME", "PER_SESSION") else None),
@@ -193,10 +200,13 @@ async def get_public_organization_website(org_slug: str, db: AsyncSession = Depe
     passes = [{"id": str(t.id), "name": t.name, "description": t.description,
                "price": float(t.price), "offer_price": float(t.offer_price) if t.offer_price is not None else None, "currency": t.currency, "tier_type": t.tier_type,
                "validity_days": t.validity_days, "total_classes": t.total_classes if t.total_classes is not None else (1 if t.tier_type == "DROP_IN" else None),
-               "classes": [{"id": str(c.session.id), "name": c.session.name} for c in t.classes
+               "class_packages": t.class_packages or [],
+               "classes": [{"id": str(c.session.id), "name": c.session.name,
+                            "total_classes": sum(p["total_classes"] for p in (t.class_packages or []) if p["session_id"] == str(c.session.id)) or None} for c in t.classes
                            if c.session.is_active and c.session.is_public and c.session.deleted_at is None and c.session.organization_id == org.id]}
               for t in tiers]
     return {
+        "purchase_policy": purchase_policy(),
         "passes": passes,
         "organization": {
             "id": str(org.id),
@@ -249,6 +259,9 @@ async def get_public_session_detail(org_slug: str, session_slug: str, db: AsyncS
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
+    from app.modules.billing.saas import require_operational_access
+    await require_operational_access(db, session.organization_id)
+
     now_utc = datetime.now(timezone.utc)
     next_occ_stmt = select(ClassOccurrence).where(
         ClassOccurrence.session_id == session.id,
@@ -263,7 +276,7 @@ async def get_public_session_detail(org_slug: str, session_slug: str, db: AsyncS
             SessionEnrollment.status == "ACTIVE"
         )
     )).scalar_one() or 0
-    remaining_spots = max(0, session.capacity - enrolled_count)
+    remaining_spots = max(0, session.capacity - enrolled_count) if session.capacity is not None else None
 
     set_stmt = select(OrganizationSetting).where(OrganizationSetting.organization_id == session.organization_id)
     org_settings = (await db.execute(set_stmt)).scalar_one_or_none()
@@ -276,15 +289,15 @@ async def get_public_session_detail(org_slug: str, session_slug: str, db: AsyncS
         parts = [org_settings.address_line1, org_settings.city, org_settings.state, org_settings.pincode]
         venue_address = ", ".join(p for p in parts if p)
     if not venue_address:
-        venue_address = f"{session.organization.name} Studio Sanctuary, Bengaluru"
+        venue_address = f"{session.organization.name} Studio, Bengaluru"
 
     venue = {
-        "name": f"{session.organization.name} Main Sanctuary",
+        "name": f"{session.organization.name} Main venue",
         "address": venue_address,
         "city": (org_settings.city if org_settings else None) or "Bengaluru",
         "delivery_mode": delivery_mode,
         "is_inherited": True,
-        "policy_source": "Inherited Studio Sanctuary Location"
+        "policy_source": "Inherited Studio Location"
     }
 
     return {
@@ -311,11 +324,12 @@ async def get_public_session_detail(org_slug: str, session_slug: str, db: AsyncS
             "capacity": session.capacity,
             "enrolled_count": enrolled_count,
             "remaining_spots": remaining_spots,
-            "is_full": remaining_spots <= 0
+            "is_full": remaining_spots is not None and remaining_spots <= 0
         },
-        "cancellation_terms": "Free cancellation up to 2 hours before class start. Class credit refunded to pass.",
+        "purchase_policy": purchase_policy(),
+        "cancellation_terms": BOOKING_CANCELLATION_TERMS,
         "cancellation_policy": {
-            "terms": "Free cancellation up to 2 hours before class start. Class credit refunded to pass.",
+            "terms": BOOKING_CANCELLATION_TERMS,
             "cutoff_hours": 2,
             "is_inherited": True,
             "policy_source": "Inherited Studio-Wide Policy"
@@ -331,6 +345,7 @@ async def get_public_session_detail(org_slug: str, session_slug: str, db: AsyncS
         },
         "class_type": session.class_type.name if session.class_type else None,
         "pricing": {
+            "packages": session.pricing.packages or [],
             "pricing_type": session.pricing.pricing_type,
             "price": float(session.pricing.price),
             "currency": session.pricing.currency,
@@ -433,6 +448,8 @@ async def public_website_html(org_slug: str, db: AsyncSession = Depends(get_db))
     ))).scalar_one_or_none()
     if not org:
         raise HTTPException(404, "Studio not found")
+    from app.modules.billing.saas import require_operational_access
+    await require_operational_access(db, org.id)
     ws = org.website
     if not ws or not ws.is_published:
         raise HTTPException(404, "Website is in Draft state and has not been published yet.")
