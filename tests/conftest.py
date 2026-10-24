@@ -23,6 +23,13 @@ async def test_engine():
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Migration 027 supplies the registration catalog in deployed databases.
+        import uuid
+        from app.models.plan import Plan
+        await conn.execute(Plan.__table__.insert(), [
+            {"id": uuid.uuid4(), "slug": slug, "name": name, "price": price}
+            for slug, name, price in [("starter", "Starter", 0), ("core", "Core", 1499), ("studio", "Studio", 3999)]
+        ])
     yield engine
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)

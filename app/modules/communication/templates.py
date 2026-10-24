@@ -1,7 +1,7 @@
 """
-Templates for ProgressRooms operational communications.
+Templates for Progress Rooms operational communications.
 Includes:
-- Nature-sanctuary styled responsive Brevo HTML email templates.
+- Nature-studio styled responsive Brevo HTML email templates.
 - Outbound Meta-compliant WhatsApp text templates.
 - Automated system responses and opt-out acknowledgments.
 """
@@ -9,13 +9,13 @@ Includes:
 from typing import Dict, Any, Optional
 
 WHATSAPP_AUTOREPLY_TEXT = (
-    "This ProgressRooms number sends automated notifications. Replies are not monitored. "
-    "Please open ProgressRooms for class details and available support options."
+    "This Progress Rooms number sends automated notifications. Replies are not monitored. "
+    "Please open Progress Rooms for class details and available support options."
 )
 
 WHATSAPP_OPTOUT_CONFIRMATION_TEXT = (
-    "You have unsubscribed from ProgressRooms operational notifications on this number. "
-    "To opt back in at any time, manage communication preferences in your ProgressRooms profile."
+    "You have unsubscribed from Progress Rooms operational notifications on this number. "
+    "To opt back in at any time, manage communication preferences in your Progress Rooms profile."
 )
 
 # ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ def render_class_reminder_15m_wa(
         f"🌿 *Starting Soon — 15 Minutes*\n\n"
         f"*{class_name}* with {teacher_name} ({studio_name}) starts in 15 minutes at *{start_time_ist}*.\n\n"
         f"Please take your seat 5 minutes early at *{suggested_join_time_ist}*.\n\n"
-        f"Join your sanctuary here:\n"
+        f"Join your studio here:\n"
         f"{join_url}"
     )
 
@@ -87,7 +87,7 @@ def render_class_cancellation_wa(
         f"🛑 *Class Cancelled — {studio_name}*\n\n"
         f"Please note that *{class_name}* scheduled for *{original_time_ist}* has been cancelled.{reason_text}\n\n"
         f"Any future reminders for this session have been automatically cancelled. "
-        f"Please check your ProgressRooms schedule for next upcoming classes."
+        f"Please check your Progress Rooms schedule for next upcoming classes."
     )
 
 
@@ -104,7 +104,7 @@ def render_billing_invoice_wa(
     invoice_url: str
 ) -> str:
     return (
-        f"💳 *ProgressRooms Studio Subscription Invoice*\n\n"
+        f"💳 *Progress Rooms Studio Subscription Invoice*\n\n"
         f"Studio: *{studio_name}*\n"
         f"Invoice: #{invoice_number}\n"
         f"Billing Period: {billing_period}\n"
@@ -122,7 +122,7 @@ def render_billing_due_soon_wa(
     invoice_url: str
 ) -> str:
     return (
-        f"⏳ *Payment Due Soon — ProgressRooms*\n\n"
+        f"⏳ *Payment Due Soon — Progress Rooms*\n\n"
         f"Studio: *{studio_name}*\n"
         f"Your subscription balance of ₹{amount_inr:,.2f} is due on *{due_date_str}*.\n\n"
         f"Pay securely to maintain uninterrupted class operations:\n"
@@ -137,10 +137,10 @@ def render_billing_overdue_wa(
     invoice_url: str
 ) -> str:
     return (
-        f"⚠️ *Overdue Notice — ProgressRooms*\n\n"
+        f"⚠️ *Overdue Notice — Progress Rooms*\n\n"
         f"Studio: *{studio_name}*\n"
         f"Your subscription payment of ₹{amount_inr:,.2f} is *{days_overdue} days overdue*.\n\n"
-        f"Please complete payment immediately to avoid service restrictions on your studio sanctuary:\n"
+        f"Please complete payment immediately to avoid service restrictions on your studio:\n"
         f"{invoice_url}"
     )
 
@@ -151,10 +151,10 @@ def render_billing_payment_received_wa(
     receipt_url: str
 ) -> str:
     return (
-        f"✅ *Payment Received — ProgressRooms*\n\n"
+        f"✅ *Payment Received — Progress Rooms*\n\n"
         f"Studio: *{studio_name}*\n"
         f"We have received your subscription payment of ₹{amount_inr:,.2f}. Thank you!\n\n"
-        f"Your studio sanctuary is in good standing. View receipt:\n"
+        f"Your studio is in good standing. View receipt:\n"
         f"{receipt_url}"
     )
 
@@ -233,14 +233,14 @@ def _email_wrapper(title: str, content_html: str) -> str:
     <div class="container">
       <div class="header">
         <div style="font-size: 28px; margin-bottom: 6px;">🌿</div>
-        <h1 class="header-title">ProgressRooms</h1>
-        <div class="header-subtitle">Virtual Studio Sanctuary</div>
+        <h1 class="header-title">Progress Rooms</h1>
+        <div class="header-subtitle">Virtual Studio</div>
       </div>
       <div class="content">
         {content_html}
       </div>
       <div class="footer">
-        <p style="margin: 0 0 6px 0;"><strong>ProgressRooms Virtual Studio Operating System</strong></p>
+        <p style="margin: 0 0 6px 0;"><strong>Progress Rooms Virtual Studio Operating System</strong></p>
         <p style="margin: 0; color: #81A882;">Independent Teacher Sanctuaries & Scheduled Batch Classrooms • India</p>
       </div>
     </div>
@@ -261,7 +261,7 @@ def render_class_reminder_2h_email(
     equipment_needed: Optional[str] = None,
     prep_instructions: Optional[str] = None
 ) -> tuple[str, str]:
-    first_name = student_name.strip().split()[0] if student_name else "Yogi"
+    first_name = student_name.strip().split()[0] if student_name else "Student"
     subject = f"🌿 2-Hour Reminder: {class_name} at {studio_name} ({start_time_ist})"
 
     equipment_row = f"""<div class="details-row"><span class="details-label">Equipment</span><span class="details-value">{equipment_needed}</span></div>""" if equipment_needed else ""
@@ -269,7 +269,7 @@ def render_class_reminder_2h_email(
 
     body = f"""
       <span class="badge">Preparation Reminder • 2 Hours</span>
-      <div class="greeting">Namaste {first_name},</div>
+      <div class="greeting">Hello {first_name},</div>
       <p style="font-size: 14px; line-height: 1.6; color: #40514E; margin: 0 0 16px 0;">
         Your upcoming class with <strong>{studio_name}</strong> is scheduled in two hours. Here are your final batch details:
       </p>
@@ -303,14 +303,14 @@ def render_class_reminder_15m_email(
     suggested_join_time_ist: str,
     join_url: str
 ) -> tuple[str, str]:
-    first_name = student_name.strip().split()[0] if student_name else "Yogi"
+    first_name = student_name.strip().split()[0] if student_name else "Student"
     subject = f"🌿 Starting in 15 Minutes: {class_name} ({start_time_ist})"
 
     body = f"""
       <span class="badge" style="background: #0C2417; color: #ffffff;">Starting Soon • 15 Minutes</span>
-      <div class="greeting">Namaste {first_name},</div>
+      <div class="greeting">Hello {first_name},</div>
       <p style="font-size: 14px; line-height: 1.6; color: #40514E; margin: 0 0 16px 0;">
-        Your sanctuary for <strong>{class_name}</strong> with <strong>{teacher_name}</strong> is opening.
+        Your class, <strong>{class_name}</strong>, with <strong>{teacher_name}</strong> is starting soon.
       </p>
 
       <div class="details-card">
@@ -319,7 +319,7 @@ def render_class_reminder_15m_email(
         <div class="details-row" style="background:#E8F0E9; padding: 10px 8px; border-radius: 8px;"><span class="details-label" style="font-weight:700; color:#0C2417;">Suggested Arrival</span><span class="details-value" style="color:#0C2417;">{suggested_join_time_ist} (5 min early)</span></div>
       </div>
 
-      <a href="{join_url}" class="cta-button">Join Sanctuary Now</a>
+      <a href="{join_url}" class="cta-button">Join Class Now</a>
     """
     return subject, _email_wrapper(subject, body)
 
@@ -332,12 +332,12 @@ def render_class_correction_email(
     latest_start_time_ist: str,
     join_url: str
 ) -> tuple[str, str]:
-    first_name = student_name.strip().split()[0] if student_name else "Yogi"
+    first_name = student_name.strip().split()[0] if student_name else "Student"
     subject = f"⚠️ Schedule Correction: {class_name} at {studio_name}"
 
     body = f"""
       <span class="badge" style="background: #FFF3CD; color: #856404;">Schedule Updated</span>
-      <div class="greeting">Namaste {first_name},</div>
+      <div class="greeting">Hello {first_name},</div>
       <p style="font-size: 14px; line-height: 1.6; color: #40514E; margin: 0 0 16px 0;">
         Please note the following consolidated changes for your upcoming class <strong>{class_name}</strong>:
       </p>
@@ -363,14 +363,14 @@ def render_class_cancellation_email(
     original_time_ist: str,
     reason: Optional[str] = None
 ) -> tuple[str, str]:
-    first_name = student_name.strip().split()[0] if student_name else "Yogi"
+    first_name = student_name.strip().split()[0] if student_name else "Student"
     subject = f"🛑 Cancelled: {class_name} at {studio_name}"
 
     reason_html = f"""<div style="margin: 16px 0; padding: 14px; background: #F8D7DA; border-radius: 10px; font-size: 12px; color: #721C24;"><strong>Reason:</strong> {reason}</div>""" if reason else ""
 
     body = f"""
       <span class="badge" style="background: #F8D7DA; color: #721C24;">Class Cancelled</span>
-      <div class="greeting">Namaste {first_name},</div>
+      <div class="greeting">Hello {first_name},</div>
       <p style="font-size: 14px; line-height: 1.6; color: #40514E; margin: 0 0 16px 0;">
         We regret to inform you that <strong>{class_name}</strong> scheduled for <strong>{original_time_ist}</strong> at <strong>{studio_name}</strong> has been cancelled.
       </p>
@@ -398,7 +398,7 @@ def render_student_payment_received_wa(
     first_name = student_name.strip().split()[0] if student_name else "Student"
     return (
         f"✅ *Payment Confirmed — {studio_name}*\n\n"
-        f"Namaste {first_name},\n"
+        f"Hello {first_name},\n"
         f"Your payment of ₹{amount_inr:,.2f} for *{class_or_pass_name}* at *{studio_name}* was successful.\n\n"
         f"Your booking has been activated. View receipt & access your classroom:\n"
         f"{receipt_url}"
@@ -413,12 +413,12 @@ def render_student_payment_received_email(
     receipt_url: str,
     payment_reference: str
 ) -> tuple[str, str]:
-    first_name = student_name.strip().split()[0] if student_name else "Yogi"
+    first_name = student_name.strip().split()[0] if student_name else "Student"
     subject = f"✅ Payment Confirmed: {class_or_pass_name} ({studio_name})"
 
     body = f"""
       <span class="badge" style="background: #E8F0E9; color: #133623;">Payment Received</span>
-      <div class="greeting">Namaste {first_name},</div>
+      <div class="greeting">Hello {first_name},</div>
       <p style="font-size: 14px; line-height: 1.6; color: #40514E; margin: 0 0 16px 0;">
         Thank you for your payment. Your enrollment with <strong>{studio_name}</strong> is now confirmed and active.
       </p>
@@ -430,7 +430,7 @@ def render_student_payment_received_email(
         <div class="details-row"><span class="details-label">Payment ID</span><span class="details-value">{payment_reference}</span></div>
       </div>
 
-      <a href="{receipt_url}" class="cta-button">Open Student Sanctuary & View Details</a>
+      <a href="{receipt_url}" class="cta-button">Open Student Studio & View Details</a>
       <p style="font-size: 11px; text-align: center; color: #81A882; margin: 0;">
         You will receive scheduled reminders prior to class commencement.
       </p>
@@ -452,13 +452,13 @@ def render_billing_invoice_email(
     invoice_url: str
 ) -> tuple[str, str]:
     first_name = recipient_name.strip().split()[0] if recipient_name else "Partner"
-    subject = f"💳 ProgressRooms Subscription Invoice #{invoice_number} ({studio_name})"
+    subject = f"💳 Progress Rooms Subscription Invoice #{invoice_number} ({studio_name})"
 
     body = f"""
       <span class="badge" style="background: #E8F0E9; color: #133623;">Invoice Issued</span>
       <div class="greeting">Dear {first_name},</div>
       <p style="font-size: 14px; line-height: 1.6; color: #40514E; margin: 0 0 16px 0;">
-        Your ProgressRooms studio platform invoice for <strong>{studio_name}</strong> has been generated.
+        Your Progress Rooms studio platform invoice for <strong>{studio_name}</strong> has been generated.
       </p>
 
       <div class="details-card">
@@ -471,7 +471,7 @@ def render_billing_invoice_email(
 
       <a href="{invoice_url}" class="cta-button">View Invoice & Pay Securely</a>
       <p style="font-size: 11px; text-align: center; color: #81A882; margin: 0;">
-        ProgressRooms Virtual Studio Operating System • Invoices & Platform Services
+        Progress Rooms Virtual Studio Operating System • Invoices & Platform Services
       </p>
     """
     return subject, _email_wrapper(subject, body)
@@ -485,7 +485,7 @@ def render_billing_due_soon_email(
     invoice_url: str
 ) -> tuple[str, str]:
     first_name = recipient_name.strip().split()[0] if recipient_name else "Partner"
-    subject = f"⏳ Payment Due Soon: ProgressRooms Subscription ({studio_name})"
+    subject = f"⏳ Payment Due Soon: Progress Rooms Subscription ({studio_name})"
 
     body = f"""
       <span class="badge" style="background: #FFF3CD; color: #856404;">Payment Due Soon</span>
@@ -516,7 +516,7 @@ def render_billing_overdue_email(
     invoice_url: str
 ) -> tuple[str, str]:
     first_name = recipient_name.strip().split()[0] if recipient_name else "Partner"
-    subject = f"⚠️ Overdue Notice: ProgressRooms Subscription ({studio_name})"
+    subject = f"⚠️ Overdue Notice: Progress Rooms Subscription ({studio_name})"
 
     body = f"""
       <span class="badge" style="background: #F8D7DA; color: #721C24;">Payment Overdue • {days_overdue} Days</span>
@@ -533,7 +533,7 @@ def render_billing_overdue_email(
 
       <a href="{invoice_url}" class="cta-button" style="background-color: #721C24;">Clear Overdue Balance Now</a>
       <p style="font-size: 11px; text-align: center; color: #81A882; margin: 0;">
-        Please settle this balance to prevent operational service restrictions on your studio sanctuary.
+        Please settle this balance to prevent operational service restrictions on your studio.
       </p>
     """
     return subject, _email_wrapper(subject, body)
@@ -547,13 +547,13 @@ def render_billing_payment_received_email(
     payment_reference: str
 ) -> tuple[str, str]:
     first_name = recipient_name.strip().split()[0] if recipient_name else "Partner"
-    subject = f"✅ Payment Received: ProgressRooms Subscription ({studio_name})"
+    subject = f"✅ Payment Received: Progress Rooms Subscription ({studio_name})"
 
     body = f"""
       <span class="badge" style="background: #E8F0E9; color: #133623;">Subscription Active</span>
       <div class="greeting">Dear {first_name},</div>
       <p style="font-size: 14px; line-height: 1.6; color: #40514E; margin: 0 0 16px 0;">
-        We have received your payment of <strong>₹{amount_inr:,.2f}</strong> for <strong>{studio_name}</strong>. Thank you for partnering with ProgressRooms!
+        We have received your payment of <strong>₹{amount_inr:,.2f}</strong> for <strong>{studio_name}</strong>. Thank you for partnering with Progress Rooms!
       </p>
 
       <div class="details-card">

@@ -81,7 +81,7 @@ async def test_student_registration_and_no_privilege_escalation(client, db_sessi
         response = await client.post("auth/register", json=dict(full_name="X", email="x@example.com", password="long-password", role=role))
         assert response.status_code == 422
     email = f"{uuid.uuid4().hex}@example.com"
-    response = await client.post("auth/register", json=dict(full_name="Student", email=email, password="long-password", phone="+91 98765 43210", location="Mumbai", role="STUDENT", privacy_accepted=True, privacy_policy_version="2026-09-27"))
+    response = await client.post("auth/register", json=dict(full_name="Student", email=email, password="long-password", phone="+91 98765 43210", location="Mumbai", role="STUDENT", privacy_accepted=True, privacy_policy_version="2026-10-21"))
     assert response.status_code == 200, response.text
     assert response.json()["otp_preview"] is None
     user = await db_session.scalar(select(User).where(User.email == email))
@@ -231,18 +231,18 @@ async def test_registration_privacy_consent_is_required_and_recorded(client, db_
         email = f"{uuid.uuid4().hex}@example.com"
         body = dict(full_name="Privacy Test", email=email, password="long-password",
                     phone="+91 98765 43210", location="Pune", role=role)
-        for extra in [{}, {"privacy_accepted": False, "privacy_policy_version": "2026-09-27"},
-                      {"privacy_accepted": "true", "privacy_policy_version": "2026-09-27"},
+        for extra in [{}, {"privacy_accepted": False, "privacy_policy_version": "2026-10-21"},
+                      {"privacy_accepted": "true", "privacy_policy_version": "2026-10-21"},
                       {"privacy_accepted": True, "privacy_policy_version": "old-version"}]:
             response = await client.post("auth/register", json={**body, **extra})
             assert response.status_code == 422, response.text
             assert not await db_session.scalar(select(User.id).where(User.email == email))
         response = await client.post("auth/register", json={**body, "privacy_accepted": True,
-                                      "privacy_policy_version": "2026-09-27"})
+                                      "privacy_policy_version": "2026-10-21"})
         assert response.status_code == 200, response.text
         user = await db_session.scalar(select(User).where(User.email == email))
         consent = await db_session.scalar(select(AuditLog).where(AuditLog.user_id == user.id,
                                         AuditLog.action == "PRIVACY_POLICY_ACCEPTED"))
         assert consent.created_at is not None
-        assert consent.new_data == {"policy_version": "2026-09-27", "audience": role,
+        assert consent.new_data == {"policy_version": "2026-10-21", "audience": role,
                                     "accepted": True, "source": "registration"}

@@ -1,6 +1,7 @@
 import uuid
 from datetime import time, date
-from pydantic import BaseModel, Field, model_validator
+from decimal import Decimal
+from pydantic import BaseModel, Field, model_validator, field_serializer
 from app.common.enums import SessionType, SkillLevel, PricingType, InstructorRole
 
 class ClassTypeCreate(BaseModel):
@@ -17,12 +18,40 @@ class ClassTypeResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class ClassPackage(BaseModel):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    total_classes: int = Field(ge=1, le=10000)
+    price: Decimal = Field(ge=0, max_digits=10, decimal_places=2)
+    offer_price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    validity_days: int = Field(default=30, ge=1, le=3650)
+
+    @field_serializer("price", "offer_price")
+    def serialize_money(self, value):
+        return float(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_offer(self):
+        if self.offer_price is not None and self.offer_price > self.price:
+            raise ValueError("Offer price must not exceed the regular price")
+        return self
+
+
 class SessionPricingCreate(BaseModel):
     pricing_type: PricingType = PricingType.MONTHLY
     price: float = Field(ge=0)
+    packages: list[ClassPackage] | None = Field(default=None, min_length=1, max_length=20)
     currency: str = "INR"
     total_classes: int | None = None
     validity_days: int | None = 30
+
+    @model_validator(mode="after")
+    def validate_packages(self):
+        if self.packages:
+            if len({p.id for p in self.packages}) != len(self.packages):
+                raise ValueError("Package IDs must be unique")
+            if len({p.total_classes for p in self.packages}) != len(self.packages):
+                raise ValueError("Each package must have a different session count")
+        return self
 
 class SessionRequirementCreate(BaseModel):
     prerequisites: str | None = None
@@ -52,7 +81,7 @@ class SessionCreate(BaseModel):
     short_description: str | None = None
     full_description: str | None = None
     session_type: SessionType = SessionType.GROUP
-    capacity: int = Field(default=20, ge=1)
+    capacity: int | None = Field(default=None, ge=1)
     min_age: int | None = None
     max_age: int | None = None
     skill_level: SkillLevel = SkillLevel.ALL_LEVELS
@@ -66,6 +95,7 @@ class SessionCreate(BaseModel):
     schedule_rules: list[ScheduleRuleCreate] = []
 
 class SessionUpdate(BaseModel):
+    acknowledge_zoom_host_impact: bool = False
     name: str | None = None
     capacity: int | None = Field(default=None, ge=1)
     duration_minutes: int | None = None
@@ -87,6 +117,8 @@ class OneOnOneSessionCreate(BaseModel):
     title: str = Field(default="1-on-1 Private Session", min_length=1, max_length=255)
     teacher_member_id: uuid.UUID
     student_user_id: uuid.UUID
+    full_description: str | None = None
+    offer_price: float | None = Field(default=None, ge=0)
     date: date
     start_time: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
     end_time: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
@@ -94,6 +126,8 @@ class OneOnOneSessionCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_range(self):
+        if self.offer_price is not None and self.offer_price > self.price:
+            raise ValueError("Offer price must not exceed regular price")
         st = time.fromisoformat(self.start_time[:5])
         et = time.fromisoformat(self.end_time[:5])
         if et <= st:

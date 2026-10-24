@@ -15,10 +15,12 @@ from app.modules.auth.schemas import (
     RequestOTPResponse,
     VerifyOTPRequest,
     TokenResponse,
-    UserResponse
+    UserResponse,
+    DashboardPreferences
 )
 from app.modules.auth.service import AuthService
 from app.modules.auth.dependencies import get_current_user
+from app.modules.zoom.service import default_host_ready
 from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -34,6 +36,8 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         whatsapp_number=payload.whatsapp_number,
         role=payload.role,
         studio_name=payload.studio_name,
+        selected_plan=payload.selected_plan,
+        billing_country=payload.billing_country,
         location=payload.location,
         privacy_policy_version=payload.privacy_policy_version
     )
@@ -116,7 +120,7 @@ async def dev_login(payload: DevLoginRequest, db: AsyncSession = Depends(get_db)
             "account_completed": bool(org_settings and org_settings.account_completed),
             "completion_step": org_settings.completion_step if org_settings else 1,
             "completion_percentage": org_settings.completion_percentage if org_settings else 0,
-            "zoom_connected": bool(org_settings and org_settings.zoom_connected),
+            "zoom_connected": await default_host_ready(db, org.id) if org else False,
             "teacher_code": member.teacher_code if member and user.role == "TEACHER" else None,
             "organizations": [
                 {
@@ -190,7 +194,7 @@ async def verify_otp(payload: VerifyOTPRequest, db: AsyncSession = Depends(get_d
             account_completed = org_settings.account_completed
             completion_step = org_settings.completion_step
             completion_percentage = org_settings.completion_percentage or 0
-            zoom_connected = org_settings.zoom_connected
+            zoom_connected = await default_host_ready(db, org.id)
         else:
             new_settings = OrganizationSetting(
                 organization_id=org.id,
@@ -243,6 +247,7 @@ from app.common.phone import PhoneNumber
 from pydantic import BaseModel, Field
 
 class ProfileUpdate(BaseModel):
+    billing_country: str | None = Field(None, pattern=r"^[A-Z]{2}$")
     full_name: str = Field(min_length=1, max_length=255)
     phone: PhoneNumber | None = None
     whatsapp_number: PhoneNumber | None = None
@@ -278,6 +283,8 @@ async def auth_context(
         selected = rows[0]
     return {
         "role": current_user.role,
+        "user_id": str(current_user.id),
+        "member_id": str(selected[0].id) if selected else None,
         "organization_id": str(selected[1].id) if selected else None,
         "organization_name": selected[1].name if selected else None,
         "organization_slug": selected[1].slug if selected else None,
@@ -314,3 +321,15 @@ async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession = Dep
 async def reset_password(payload: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
     msg = await AuthService.reset_password(db, payload.email, payload.code, payload.new_password)
     return {"message": msg, "success": True}
+
+
+@router.get("/me/preferences", response_model=DashboardPreferences)
+async def get_preferences(current_user: User = Depends(get_current_user)):
+    return {"dashboard_font": current_user.dashboard_font}
+
+
+@router.patch("/me/preferences", response_model=DashboardPreferences)
+async def update_preferences(payload: DashboardPreferences, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    current_user.dashboard_font = payload.dashboard_font
+    await db.commit()
+    return {"dashboard_font": current_user.dashboard_font}

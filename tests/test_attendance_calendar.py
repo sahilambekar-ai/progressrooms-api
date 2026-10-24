@@ -47,11 +47,11 @@ async def test_teacher_calendar_persistence_permissions_and_local_dates(db_sessi
             response=await client.get(url+'?month=2026-10',headers=headers(owner))
             assert response.status_code==200,response.text
             assert response.json()[0]['date']=='2026-10-15'
-            assert response.json()[0]['status']=='UNMARKED'
+            assert response.json()[0]['status']=='PRESENT'
             assert response.json()[0]['teacherName']=='Teacher'
             target=f'{url}/occurrences/{occurrence.id}'
             assert (await client.put(target,json={'status':'PRESENT'},headers=headers(teacher))).status_code==403
-            for value in ['PRESENT','ABSENT']:
+            for value in ['PRESENT','ABSENT','EXCUSED']:
                 response=await client.put(target,json={'status':value,'notes':'Owner correction'},headers=headers(owner))
                 assert response.status_code==200,response.text
                 saved=(await client.get(url+'?month=2026-10',headers=headers(owner))).json()[0]
@@ -64,8 +64,8 @@ async def test_teacher_calendar_persistence_permissions_and_local_dates(db_sessi
             assert (await client.put(f'{root}/teachers/{owner_member.id}/occurrences/{occurrence.id}',json={'status':'PRESENT'},headers=headers(owner))).status_code==404
             student_url=f'{root}/students/{student.id}?month=2026-10'
             student_self_url='/student/attendance?month=2026-10'
-            assert (await client.get(student_url,headers=headers(owner))).json()[0]['status']=='UNMARKED'
-            assert (await client.get(student_self_url,headers=headers(student))).json()[0]['status']=='UNMARKED'
+            assert (await client.get(student_url,headers=headers(owner))).json()[0]['status']=='PRESENT'
+            assert (await client.get(student_self_url,headers=headers(student))).json()[0]['status']=='PRESENT'
             db_session.add(AttendanceRecord(class_occurrence_id=occurrence.id,session_enrollment_id=enrollment.id,status='ATTENDED'))
             await db_session.commit()
             assert (await client.get(student_url,headers=headers(owner))).json()[0]['status']=='PRESENT'

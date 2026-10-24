@@ -12,8 +12,10 @@ class RegisterRequest(BaseModel):
     role: Literal["STUDIO", "STUDENT"] = "STUDIO"
     location: str | None = Field(default=None, max_length=255)
     studio_name: str | None = None
+    selected_plan: Literal["starter", "core", "studio"] = "starter"
+    billing_country: str | None = Field(default=None, pattern=r"^[A-Z]{2}$")
     privacy_accepted: StrictBool
-    privacy_policy_version: Literal["2026-09-27"]
+    privacy_policy_version: Literal["2026-10-21", "2026-10-23"]
 
     @model_validator(mode="after")
     def require_student_phone(self):
@@ -89,7 +91,12 @@ class UserResponse(BaseModel):
     username: str | None = None
     address: str | None = None
     location: str | None = None
+    billing_country: str | None = None
     avatar_url: str | None = None
 
     class Config:
         from_attributes = True
+
+
+class DashboardPreferences(BaseModel):
+    dashboard_font: Literal["lora", "manrope", "dm-sans", "ibm-plex", "source-sans", "source-serif"] = "ibm-plex"

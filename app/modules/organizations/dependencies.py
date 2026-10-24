@@ -1,5 +1,5 @@
 import uuid
-from fastapi import Depends, HTTPException, status, Path
+from fastapi import Depends, HTTPException, status, Path, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
@@ -11,7 +11,8 @@ from app.common.enums import UserRole
 async def get_current_tenant_member(
     org_id: uuid.UUID = Path(...),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ) -> tuple[Organization, OrganizationMember | None]:
     """Validates tenant exists and resolves current user's membership within this organization."""
     org_stmt = select(Organization).where(Organization.id == org_id, Organization.deleted_at.is_(None))
@@ -41,6 +42,13 @@ async def get_current_tenant_member(
 
     if membership.role != current_user.role:
         raise HTTPException(403, "Account and studio membership roles do not match")
+    suffix = request.url.path.split(f"/organizations/{org_id}", 1)[-1] if request else None
+    recovery = request and ((suffix == "" and request.method == "GET")
+        or suffix == "/profile" or suffix == "/saas-billing" or suffix.startswith("/saas-billing/")
+        or (request.method == "GET" and suffix in {"/billing/progressrooms", "/billing/teachers"}))
+    if not recovery:
+        from app.modules.billing.saas import require_operational_access
+        await require_operational_access(db, org.id)
     return org, membership
 
 def require_org_role(allowed_roles: list[UserRole]):
@@ -76,5 +84,7 @@ async def resolve_staff_studio(db, user, studio_id=None, owner_only=False):
     rows = (await db.execute(stmt)).all()
     if len(rows) == 0:
         raise HTTPException(403, "Select a studio you belong to")
+    from app.modules.billing.saas import require_operational_access
+    await require_operational_access(db, rows[0][0].id)
     return rows[0]
 

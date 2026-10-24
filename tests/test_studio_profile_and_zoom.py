@@ -1,5 +1,8 @@
 import pytest
 import uuid
+from fastapi import HTTPException
+from unittest.mock import AsyncMock
+from test_teacher_zoom import zoom_config, studio
 from sqlalchemy import select
 from app.models.organization import Organization, OrganizationMember, OrganizationSetting
 from app.models.integration import OrganizationIntegration
@@ -17,7 +20,8 @@ from app.modules.organizations.router import (
 )
 
 @pytest.mark.asyncio
-async def test_studio_registration_and_profile_flow(db_session):
+async def test_studio_registration_and_profile_flow(db_session, monkeypatch, zoom_config):
+    monkeypatch.setattr("app.modules.auth.service.send_otp_email", AsyncMock())
     # 1. Register a new studio user
     email = "newstudio.owner@yogastudio.test"
     otp_code, rec_id, msg = await AuthService.register_user(
@@ -98,23 +102,17 @@ async def test_studio_registration_and_profile_flow(db_session):
     assert up_res["completion_percentage"] > 0
     assert user.phone == "+91 98765 11223"
 
-    # 7. Connect Zoom
-    zoom_req = ZoomConnectRequest(
-        account_email="maya.zoom@shala.org",
-        auto_meeting_enabled=True,
-        waiting_room=True,
-        host_video=True,
-        is_dev_simulation=True
-    )
-    zoom_res = await connect_zoom(
-        org_id=org.id,
-        payload=zoom_req,
-        tenant=(org, member),
-        current_user=user,
-        db=db_session
-    )
-    assert zoom_res["status"] == "connected"
-    assert zoom_res["account_email"] == "maya.zoom@shala.org"
+    # Legacy S2S cannot mark an arbitrary email connected, even using a client simulation flag.
+    with pytest.raises(HTTPException) as error:
+        await connect_zoom(org.id, ZoomConnectRequest(account_email="maya.zoom@shala.org", is_dev_simulation=True), (org, member), user, db_session)
+    assert error.value.status_code == 410
+
+    # Initial Zoom authentication is mandatory, while location and tax details remain optional.
+    with pytest.raises(HTTPException) as missing_zoom:
+        await update_studio_profile(org.id, StudioProfileUpdate(account_completed=True), (org, member), user, db_session)
+    assert missing_zoom.value.status_code == 422
+    from test_teacher_zoom import authorize
+    await authorize(db_session, org, member, user)
 
     # 8. Mark Account as Completed (Step 6 Complete)
     complete_payload = StudioProfileUpdate(
@@ -132,20 +130,11 @@ async def test_studio_registration_and_profile_flow(db_session):
     assert final_res["completion_percentage"] == 100
     assert final_res["zoom_connected"] is True
 
-    # 9. Verify generated Zoom meeting
-    meet_req = ZoomMeetingGenerateRequest(
-        topic="Sunrise Vinyasa Flow",
-        duration_minutes=60
-    )
-    meet_res = await generate_zoom_meeting(
-        org_id=org.id,
-        payload=meet_req,
-        tenant=(org, member),
-        db=db_session
-    )
-    assert meet_res["provider"] in ("ZOOM", "DEV_SIMULATION")
-    assert meet_res.get("is_simulated") is True
-    assert len(meet_res["passcode"]) >= 6
+    # Studio onboarding completes without optional Zoom authorization.
+    assert final_res["account_completed"] is True
+    with pytest.raises(HTTPException) as error:
+        await generate_zoom_meeting(org.id, ZoomMeetingGenerateRequest(topic="Class"), (org, member), db_session)
+    assert error.value.status_code == 410
 
     # 10. Verify Profiler data
     final_profile = await get_studio_profile(
@@ -158,3 +147,21 @@ async def test_studio_registration_and_profile_flow(db_session):
     assert final_profile["account_number_masked"].endswith("7890")
     assert final_profile["upi_id"] == "mayashala@okhdfcbank"
     assert final_profile["zoom_connected"] is True
+
+
+@pytest.mark.asyncio
+async def test_onboarding_optional_steps_multiline_intro_and_monthly_payouts(db_session, studio):
+    org, owner, _, member, _ = studio
+    from test_teacher_zoom import authorize
+    await authorize(db_session, org, member, owner)
+    introduction = "Teaching across disciplines.\n" + "Our students learn together. " * 30
+    result = await update_studio_profile(org.id, StudioProfileUpdate(
+        studio_tagline=introduction, settlement_cycle="WEEKLY", account_completed=True
+    ), (org, member), owner, db_session)
+    assert result["account_completed"] is True
+    profile = await get_studio_profile(org.id, (org, member), db_session)
+    assert profile["studio_tagline"] == introduction.strip()
+    assert profile["settlement_cycle"] == "MONTHLY"
+    assert profile["teaching_mode"] == "ONLINE"
+    assert not profile["address_line1"] and not profile["pan_number"] and not profile["gst_number"]
+    assert profile["zoom_connected"] is True

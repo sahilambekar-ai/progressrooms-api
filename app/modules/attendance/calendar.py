@@ -1,3 +1,4 @@
+from app.modules.attendance.status import calendar_status
 import uuid
 from datetime import datetime, timezone
 from typing import Literal
@@ -36,16 +37,9 @@ def month_bounds(month, org):
 def event_dict(occ, session, status, notes, zone, **extra):
     local = occ.actual_start_at.replace(tzinfo=timezone.utc) if occ.actual_start_at.tzinfo is None else occ.actual_start_at
     local = local.astimezone(zone)
-    final_status = status
-    if not final_status:
-        if occ.status == "CANCELLED":
-            final_status = "CANCELLED"
-        elif occ.status == "SCHEDULED":
-            final_status = "SCHEDULED"
-        else:
-            final_status = "UNMARKED"
+    final_status = calendar_status(occ.actual_start_at, occ.status, status)
     return dict(id=str(occ.id), occurrenceId=str(occ.id), date=local.date().isoformat(),
-                time=local.strftime("%I:%M %p"), sessionTitle=session.name,
+                time=local.strftime("%I:%M %p"), startAt=local.isoformat(), sessionTitle=session.name, description=session.full_description,
                 status=final_status,
                 remarks=notes or "", **extra)
 
@@ -57,7 +51,7 @@ async def teacher_calendar(org_id: uuid.UUID, teacher_id: uuid.UUID,
     if member and member.role == "TEACHER" and member.id != teacher_id:
         raise HTTPException(403, "You can only review your own teacher attendance")
     teacher = await db.scalar(select(OrganizationMember).where(OrganizationMember.id == teacher_id,
-        OrganizationMember.organization_id == org_id, OrganizationMember.role.in_(["STUDIO", "TEACHER"])))
+        OrganizationMember.organization_id == org_id, OrganizationMember.can_teach.is_(True)))
     if not teacher:
         raise HTTPException(404, "Teacher not found")
     start, end, zone = month_bounds(month, org)
@@ -74,7 +68,7 @@ async def teacher_calendar(org_id: uuid.UUID, teacher_id: uuid.UUID,
 
 
 class TeacherAttendanceUpdate(BaseModel):
-    status: Literal["PRESENT", "ABSENT", "CANCELLED"]
+    status: Literal["PRESENT", "ABSENT", "EXCUSED", "CANCELLED"]
     notes: str | None = Field(default=None, max_length=2000)
 
 
@@ -83,7 +77,7 @@ async def save_teacher_attendance(org_id: uuid.UUID, teacher_id: uuid.UUID, occu
         payload: TeacherAttendanceUpdate, tenant=Depends(write_access),
         user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     teacher = await db.scalar(select(OrganizationMember).where(OrganizationMember.id == teacher_id,
-        OrganizationMember.organization_id == org_id, OrganizationMember.role.in_(["STUDIO", "TEACHER"])))
+        OrganizationMember.organization_id == org_id, OrganizationMember.can_teach.is_(True)))
     if not teacher:
         raise HTTPException(404, "Teacher not found")
     # Lock the occurrence so concurrent saves cannot create duplicate attendance rows.
@@ -96,9 +90,9 @@ async def save_teacher_attendance(org_id: uuid.UUID, teacher_id: uuid.UUID, occu
     if record is None:
         record = TeacherAttendance(class_occurrence_id=occurrence_id, teacher_member_id=teacher_id)
         db.add(record)
-    record.status, record.notes, record.marked_by_user_id = payload.status, payload.notes, user.id
+    record.status, record.notes, record.marked_by_user_id = ("CANCELLED" if payload.status == "EXCUSED" else payload.status), payload.notes, user.id
     await db.commit()
-    return {"status": record.status, "notes": record.notes}
+    return {"status": "EXCUSED" if record.status == "CANCELLED" else record.status, "notes": record.notes}
 
 
 @router.get("/students/{student_id}")
@@ -122,7 +116,7 @@ async def student_calendar(org_id: uuid.UUID, student_id: uuid.UUID,
     rows = (await db.execute(stmt.order_by(ClassOccurrence.actual_start_at))).all()
     result = []
     for occ, session, record, enrollment in rows:
-        status = {"ATTENDED": "PRESENT", "ABSENT": "ABSENT", "EXCUSED": "CANCELLED"}.get(record.status) if record else None
+        status = {"ATTENDED": "PRESENT", "ABSENT": "ABSENT", "EXCUSED": "EXCUSED"}.get(record.status) if record else None
         event = event_dict(occ, session, status, record.notes if record else None, zone)
         event["id"] = f"{occ.id}:{enrollment.id}"
         event["enrollmentId"] = str(enrollment.id)

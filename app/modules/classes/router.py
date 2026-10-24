@@ -37,21 +37,28 @@ async def delete_session(
     tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN])),
     db: AsyncSession = Depends(get_db),
 ):
+    from app.modules.zoom.service import lock_studio
+    from app.modules.zoom.meetings import synchronize
+    await lock_studio(db, org_id)
     session = await db.scalar(select(Session).where(
         Session.id == class_id, Session.organization_id == org_id, Session.deleted_at.is_(None)))
     if not session:
         raise HTTPException(404, "Class not found")
 
     now = datetime.now(timezone.utc)
+    future = (await db.scalars(select(ClassOccurrence).where(ClassOccurrence.session_id == class_id,
+        ClassOccurrence.organization_id == org_id, ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED"]),
+        ClassOccurrence.actual_start_at >= now).with_for_update())).all()
+    # Remote deletes are idempotent; a provider outage keeps the local batch intact for retry.
+    for occurrence in future:
+        await synchronize(db, occurrence, "cancel")
     session.deleted_at = now
     session.is_active = False
     await db.execute(update(SessionScheduleRule).where(
         SessionScheduleRule.session_id == class_id).values(is_active=False))
-    await db.execute(update(ClassOccurrence).where(
-        ClassOccurrence.session_id == class_id,
-        ClassOccurrence.status == OccurrenceStatus.SCHEDULED.value,
-        ClassOccurrence.actual_start_at >= now,
-    ).values(status=OccurrenceStatus.CANCELLED.value, cancellation_reason="Class batch deleted"))
+    for occurrence in future:
+        occurrence.status = OccurrenceStatus.CANCELLED.value
+        occurrence.cancellation_reason = "Class batch deleted"
     await db.commit()
 
 @router.get("/class-types")
@@ -97,6 +104,7 @@ async def list_sessions(
 
     stmt = select(Session).options(
         selectinload(Session.class_type),
+        selectinload(Session.requirements),
         selectinload(Session.pricing),
         selectinload(Session.instructors).selectinload(SessionInstructor.member).selectinload(OrganizationMember.user),
         selectinload(Session.schedule_rules),
@@ -115,10 +123,13 @@ async def list_sessions(
             "name": s.name,
             "slug": s.slug,
             "short_description": s.short_description,
+            "full_description": s.full_description,
             "class_type": s.class_type.name if s.class_type else None,
             "session_type": s.session_type,
             "skill_level": s.skill_level,
             "duration_minutes": s.duration_minutes,
+            "language": s.language,
+            "requirements": {key: getattr(s.requirements, key) for key in ("prerequisites", "required_equipment", "preparation_instructions", "additional_notes")} if s.requirements else None,
             "capacity": s.capacity,
             "is_active": s.is_active,
             "deleted_at": s.deleted_at.isoformat() if s.deleted_at else None,
@@ -126,7 +137,10 @@ async def list_sessions(
             "pricing": {
                 "pricing_type": s.pricing.pricing_type,
                 "price": float(s.pricing.price),
-                "currency": s.pricing.currency
+                "currency": s.pricing.currency,
+                "total_classes": s.pricing.total_classes,
+                "validity_days": s.pricing.validity_days,
+                "packages": s.pricing.packages or []
             } if s.pricing else None,
             "instructors": [
                 {
@@ -179,7 +193,7 @@ async def create_one_on_one_class(
             OrganizationMember.id == payload.teacher_member_id,
             OrganizationMember.organization_id == org_id,
             OrganizationMember.is_active == True,
-            OrganizationMember.role.in_(["STUDIO", "TEACHER"])
+            OrganizationMember.can_teach.is_(True)
         )
     )
     if not teacher:
@@ -240,7 +254,7 @@ async def create_one_on_one_class(
     end_dt = datetime.combine(payload.date, et_time, tzinfo=org_tz).astimezone(timezone.utc)
 
     # Generate meeting link
-    meeting_url = f"{settings.CLASS_MEETING_BASE_URL.rstrip('/')}/ProgressRooms-{secrets.token_urlsafe(24)}"
+    meeting_url = None
 
     # Create Session (Capacity is strictly 1, non-repeating)
     session = Session(
@@ -249,6 +263,7 @@ async def create_one_on_one_class(
         name=payload.title,
         slug=f"1on1-{uuid.uuid4().hex[:8]}",
         short_description="1-on-1 Private Session",
+        full_description=payload.full_description,
         session_type=SessionType.ONE_TO_ONE.value,
         capacity=1,
         skill_level=SkillLevel.ALL_LEVELS.value,
@@ -264,7 +279,7 @@ async def create_one_on_one_class(
     pricing = SessionPricing(
         session_id=session.id,
         pricing_type=PricingType.PER_SESSION.value,
-        price=payload.price,
+        price=payload.offer_price if payload.offer_price is not None else payload.price,
         currency="INR",
         total_classes=1,
         validity_days=7
@@ -366,7 +381,7 @@ async def create_session(
     for member_id in payload.instructor_member_ids:
         if not await db.scalar(select(OrganizationMember.id).where(OrganizationMember.id == member_id,
             OrganizationMember.organization_id == org_id, OrganizationMember.is_active == True,
-            OrganizationMember.role.in_(["STUDIO", "TEACHER"]))):
+            OrganizationMember.can_teach.is_(True))):
             raise HTTPException(422, "Teacher must belong to this studio")
     session = Session(
         organization_id=org_id,
@@ -395,6 +410,7 @@ async def create_session(
         price=payload.pricing.price,
         currency=payload.pricing.currency,
         total_classes=payload.pricing.total_classes,
+        packages=[p.model_dump(mode="json") for p in payload.pricing.packages] if payload.pricing.packages else None,
         validity_days=payload.pricing.validity_days
     )
     db.add(pricing)
@@ -415,7 +431,7 @@ async def create_session(
         si = SessionInstructor(
             session_id=session.id,
             member_id=member_id,
-            role="PRIMARY"
+            role="PRIMARY" if member_id == payload.instructor_member_ids[0] else "ASSISTANT"
         )
         db.add(si)
 
@@ -434,11 +450,12 @@ async def create_session(
         )
         db.add(sr)
 
+    # Keep creation and scheduling together so a failed schedule does not leave
+    # a saved class behind when the caller retries.
+    await db.flush()
+    await SchedulingEngine.generate_occurrences_for_session(db, session.id, days_ahead=30)
     await db.commit()
     await db.refresh(session)
-
-    # Proactively generate rolling occurrences for 30 days
-    await SchedulingEngine.generate_occurrences_for_session(db, session.id, days_ahead=30)
 
     return {"id": str(session.id), "name": session.name, "slug": session.slug, "is_active": session.is_active}
 
@@ -448,23 +465,31 @@ async def update_session(
     org_id: uuid.UUID,
     class_id: uuid.UUID,
     payload: SessionUpdate,
-    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN])),
+    tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN, UserRole.TEACHER])),
     db: AsyncSession = Depends(get_db)
 ):
     org, _ = tenant
     stmt = select(Session).options(
         selectinload(Session.pricing),
         selectinload(Session.instructors),
-        selectinload(Session.schedule_rules)
+        selectinload(Session.schedule_rules),
+        selectinload(Session.requirements)
     ).where(Session.id == class_id, Session.organization_id == org_id, Session.deleted_at.is_(None))
     res = await db.execute(stmt)
     session = res.scalar_one_or_none()
     if not session:
         raise HTTPException(404, "Class not found")
 
+    member = tenant[1]
+    if member and member.role == "TEACHER":
+        if not any(i.member_id == member.id for i in session.instructors):
+            raise HTTPException(403, "You can only edit packages for your assigned classes")
+        if payload.model_fields_set - {"pricing"}:
+            raise HTTPException(403, "Teachers can edit class packages only")
+
     if payload.name is not None:
         session.name = payload.name
-    if payload.capacity is not None:
+    if "capacity" in payload.model_fields_set:
         session.capacity = payload.capacity
     if payload.duration_minutes is not None:
         session.duration_minutes = payload.duration_minutes
@@ -474,7 +499,7 @@ async def update_session(
         session.is_public = payload.is_public
     if payload.short_description is not None:
         session.short_description = payload.short_description
-    if payload.full_description is not None:
+    if "full_description" in payload.model_fields_set:
         session.full_description = payload.full_description
     if payload.skill_level is not None:
         session.skill_level = payload.skill_level.value
@@ -497,18 +522,24 @@ async def update_session(
             )
 
     if payload.instructor_member_ids is not None:
+        old_teachers = [i.member_id for i in session.instructors]
+        old_primary = next((i.member_id for i in session.instructors if i.role == "PRIMARY"), None)
+        if (set(old_teachers) != set(payload.instructor_member_ids) or old_primary != (payload.instructor_member_ids[0] if payload.instructor_member_ids else None)) and not getattr(payload, "acknowledge_zoom_host_impact", False) and await db.scalar(select(ClassOccurrence.id).where(
+            ClassOccurrence.session_id == session.id, ClassOccurrence.actual_start_at > datetime.now(timezone.utc),
+            ClassOccurrence.zoom_connection_id.is_not(None), ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED"])).limit(1)):
+            raise HTTPException(409, "Existing Zoom meetings retain their saved host. Reconcile individual class hosts in Zoom Settings before changing teacher assignments.")
         for member_id in payload.instructor_member_ids:
             if not await db.scalar(select(OrganizationMember.id).where(
                 OrganizationMember.id == member_id,
                 OrganizationMember.organization_id == org_id,
                 OrganizationMember.is_active == True,
-                OrganizationMember.role.in_(["STUDIO", "TEACHER"])
+                OrganizationMember.can_teach.is_(True)
             )):
                 raise HTTPException(422, "Teacher must belong to this studio")
         for ins in list(session.instructors):
             await db.delete(ins)
         for member_id in payload.instructor_member_ids:
-            si = SessionInstructor(session_id=session.id, member_id=member_id, role="PRIMARY")
+            si = SessionInstructor(session_id=session.id, member_id=member_id, role="PRIMARY" if member_id == payload.instructor_member_ids[0] else "ASSISTANT")
             db.add(si)
 
         # Update instructor on future scheduled occurrences
@@ -531,6 +562,8 @@ async def update_session(
             session.pricing.currency = payload.pricing.currency
             session.pricing.total_classes = payload.pricing.total_classes
             session.pricing.validity_days = payload.pricing.validity_days
+            if "packages" in payload.pricing.model_fields_set:
+                session.pricing.packages = [p.model_dump(mode="json") for p in payload.pricing.packages] if payload.pricing.packages else None
         else:
             session.pricing = SessionPricing(
                 session_id=session.id,
@@ -538,10 +571,17 @@ async def update_session(
                 price=payload.pricing.price,
                 currency=payload.pricing.currency,
                 total_classes=payload.pricing.total_classes,
+                packages=[p.model_dump(mode="json") for p in payload.pricing.packages] if payload.pricing.packages else None,
                 validity_days=payload.pricing.validity_days
             )
 
     if payload.schedule_rules is not None:
+        existing_rules = sorted([(r.day_of_week, r.start_time.isoformat(), r.end_time.isoformat(), str(r.effective_start_date), str(r.effective_end_date)) for r in session.schedule_rules], key=str)
+        requested_rules = sorted([(r.day_of_week, time.fromisoformat(r.start_time).isoformat(), time.fromisoformat(r.end_time).isoformat(), str(r.effective_start_date), str(r.effective_end_date)) for r in payload.schedule_rules], key=str)
+        if existing_rules != requested_rules and await db.scalar(select(ClassOccurrence.id).where(ClassOccurrence.session_id == session.id,
+            ClassOccurrence.actual_start_at > datetime.now(timezone.utc), ClassOccurrence.zoom_connection_id.is_not(None),
+            ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED"])).limit(1)):
+            raise HTTPException(409, "This timetable has provisioned Zoom meetings. Reschedule its existing occurrences explicitly before changing recurring rules.")
         for rule in list(session.schedule_rules):
             await db.delete(rule)
         for rule in payload.schedule_rules:

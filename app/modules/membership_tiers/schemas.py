@@ -2,6 +2,10 @@ import uuid
 from decimal import Decimal
 from pydantic import BaseModel, Field, model_validator
 
+class ClassPackageSelection(BaseModel):
+    session_id: uuid.UUID
+    package_id: uuid.UUID
+
 class MembershipTierCreate(BaseModel):
     name: str
     tier_type: str = "MONTHLY"  # MONTHLY, PACKAGE, DROP_IN
@@ -13,6 +17,7 @@ class MembershipTierCreate(BaseModel):
     description: str | None = None
     is_active: bool = True
     class_ids: list[uuid.UUID] = []
+    class_packages: list[ClassPackageSelection] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")
     def validate_offer_price(self):
@@ -31,6 +36,7 @@ class MembershipTierUpdate(BaseModel):
     description: str | None = None
     is_active: bool | None = None
     class_ids: list[uuid.UUID] | None = None
+    class_packages: list[ClassPackageSelection] | None = Field(default=None, max_length=100)
 
 class MembershipTierToggleStatus(BaseModel):
     is_active: bool | None = None

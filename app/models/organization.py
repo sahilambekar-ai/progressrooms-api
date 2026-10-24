@@ -37,6 +37,7 @@ class OrganizationMember(Base, TimestampMixin):
     title: Mapped[str | None] = mapped_column(String(100), nullable=True)
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    can_teach: Mapped[bool] = mapped_column(Boolean, default=lambda context: context.get_current_parameters().get("role", "TEACHER") in {"STUDIO", "TEACHER"}, nullable=False)
     teacher_code: Mapped[str | None] = mapped_column(String(8), unique=True, index=True, nullable=True)
 
     organization: Mapped["Organization"] = relationship(back_populates="members")
@@ -60,6 +61,8 @@ class OrganizationStudent(Base, TimestampMixin):
 
 class OrganizationSetting(Base, TimestampMixin):
     __tablename__ = "organization_settings"
+    __table_args__ = (ForeignKeyConstraint(["organization_id", "default_zoom_host_member_id"],
+        ["organization_members.organization_id", "organization_members.id"], name="fk_default_zoom_host"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), unique=True, nullable=False)
@@ -70,11 +73,11 @@ class OrganizationSetting(Base, TimestampMixin):
     # Studio Profile & Contact
     phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     whatsapp_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    studio_tagline: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    studio_tagline: Mapped[str | None] = mapped_column(Text, nullable=True)
     disciplines: Mapped[str | None] = mapped_column(String(500), nullable=True) # Comma-separated or tags
 
     # Studio Location & Teaching Mode
-    teaching_mode: Mapped[str] = mapped_column(String(50), default="HYBRID", nullable=False) # PHYSICAL, ONLINE, HYBRID
+    teaching_mode: Mapped[str] = mapped_column(String(50), default="ONLINE", nullable=False) # PHYSICAL, ONLINE, HYBRID
     address_line1: Mapped[str | None] = mapped_column(String(255), nullable=True)
     address_line2: Mapped[str | None] = mapped_column(String(255), nullable=True)
     city: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -94,14 +97,32 @@ class OrganizationSetting(Base, TimestampMixin):
     account_number_enc: Mapped[str | None] = mapped_column(String(255), nullable=True)
     ifsc_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     upi_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    settlement_cycle: Mapped[str] = mapped_column(String(50), default="WEEKLY", nullable=False)
+    settlement_cycle: Mapped[str] = mapped_column(String(50), default="MONTHLY", nullable=False)
 
     # Zoom Authentication & Classroom Preferences
     zoom_connected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     zoom_account_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    zoom_auto_meeting_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_auto_meeting_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     zoom_waiting_room: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     zoom_host_video: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Zoom Advanced & Class Access Preferences
+    zoom_enforce_basic_login: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_enforce_zoom_login: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    zoom_group_allow_self_buy_subscriptions: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_group_active_subscription_required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_group_confirm_checkin_everytime: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_personal_allow_self_buy_subscriptions: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_personal_active_subscription_required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_personal_confirm_checkin_everytime: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_personal_no_show_penalty: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_join_before_host: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_cloud_recording_mode: Mapped[str] = mapped_column(String(50), default="DO_NOT_SHARE", nullable=False)
+    zoom_host_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    default_zoom_host_member_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    zoom_fallback_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    zoom_settings_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     # Onboarding Status
     account_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

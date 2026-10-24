@@ -38,6 +38,8 @@ class OrderItem(Base, TimestampMixin):
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     subtotal: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
 
+    total_classes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     order: Mapped["Order"] = relationship(back_populates="items")
     session: Mapped["Session"] = relationship()
 

@@ -459,6 +459,10 @@ async def dispatch_pending_reminders(
             job.status = "CANCELLED"
             continue
 
+        from app.modules.billing.saas import operational_access
+        if not await operational_access(db, occ.organization_id):
+            continue
+
         studio_name = occ.session.organization.name if occ.session.organization else "Studio"
         class_name = occ.session.name
         teacher_name = occ.instructor.user.full_name if (occ.instructor and occ.instructor.user) else "Assigned Instructor"
@@ -704,6 +708,10 @@ async def process_debounced_material_corrections(
         occ = change.occurrence
         if not occ or not occ.session or occ.status == "CANCELLED":
             change.processed = True
+            continue
+
+        from app.modules.billing.saas import operational_access
+        if not await operational_access(db, occ.organization_id):
             continue
 
         studio_name = occ.session.organization.name if occ.session.organization else "Studio"

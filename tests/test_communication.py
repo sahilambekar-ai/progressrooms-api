@@ -49,11 +49,13 @@ async def get_or_create_superadmin(db_session):
 
 
 @pytest.mark.asyncio
-async def test_communication_settings_rbac(db_session, client, auth_headers):
+async def test_communication_settings_rbac(db_session, client, auth_headers, monkeypatch):
     """
     Only SUPER_ADMIN can view and manage platform communication channel toggles.
     Other roles (STUDIO, TEACHER, STUDENT) must receive 403 Forbidden.
     """
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "DEV_TEST_LOGIN_ENABLED", False)
     superadmin = await get_or_create_superadmin(db_session)
     studio_user = User(
         email=f"owner_{uuid.uuid4().hex[:6]}@studio.test",
@@ -127,7 +129,7 @@ async def test_communication_channel_toggles_and_audit_logging(db_session, clien
 
 
 @pytest.mark.asyncio
-async def test_channel_switch_suppression_and_test_dispatch(db_session, client, auth_headers):
+async def test_channel_switch_suppression_and_test_dispatch(db_session, client, auth_headers, monkeypatch):
     """
     Verifies that switching a channel off suppresses test dispatches and logs
     the exact reason ('Suppressed: email disabled' / 'Suppressed: whatsapp disabled').
@@ -163,6 +165,10 @@ async def test_channel_switch_suppression_and_test_dispatch(db_session, client, 
     assert res_wa_data["status"] == "SUPPRESSED"
     assert res_wa_data["suppression_reason"] == "Suppressed: whatsapp disabled"
 
+    # Provider credentials are explicit so this test does not depend on a local .env.
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "unit-test-key-not-a-real-credential")
+
     # 3. Turn Email back ON -> Test email succeeds (SENT)
     await client.patch(
         "/admin/communication/settings",
@@ -170,12 +176,13 @@ async def test_channel_switch_suppression_and_test_dispatch(db_session, client, 
         headers=auth_headers(superadmin),
     )
     from unittest.mock import patch, AsyncMock
-    with patch("app.modules.communication.service._dispatch_brevo_request", new_callable=AsyncMock, return_value=(200, {"messageId": "test_msg_ok_123"}, "ok")):
+    with patch("app.modules.communication.service._dispatch_brevo_request", new_callable=AsyncMock, return_value=(200, {"messageId": "test_msg_ok_123"}, "ok")) as dispatch:
         test_email_on = await client.post(
             "/admin/communication/test",
             json={"channel": "EMAIL", "recipient": "student@example.com"},
             headers=auth_headers(superadmin),
         )
+    dispatch.assert_awaited_once()
     assert test_email_on.status_code == 200
     assert test_email_on.json()["status"] == "SENT"
 
@@ -239,3 +246,100 @@ async def test_auth_emails_unaffected_by_operational_toggle(db_session, client, 
     )
 
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["EMAIL", "WHATSAPP_ADMIN", "WHATSAPP_CLASSES"])
+async def test_simulated_tests_do_not_claim_delivery(db_session, client, auth_headers, monkeypatch, channel):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "")
+    admin = await get_or_create_superadmin(db_session)
+    headers = auth_headers(admin)
+    await client.patch("/admin/communication/settings", headers=headers,
+                       json={"email_enabled": True, "whatsapp_enabled": True})
+    response = await client.post("/admin/communication/test", headers=headers,
+                                 json={"channel": channel, "recipient": "test@example.com" if channel == "EMAIL" else "+919876543210"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "SIMULATED"
+    assert response.json()["success"] is False
+    history = await client.get("/admin/communication/history", headers=headers)
+    assert history.status_code == 200
+    assert history.json()["items"][0]["status"] == "SIMULATED"
+
+
+@pytest.mark.asyncio
+async def test_brevo_rejection_reports_provider_error(db_session, client, auth_headers, monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.core.config import settings
+    from app.modules.communication import service
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "test-provider-key")
+    monkeypatch.setattr(service, "_dispatch_brevo_request", AsyncMock(return_value=(400, {}, "Invalid sender")))
+    admin = await get_or_create_superadmin(db_session)
+    headers = auth_headers(admin)
+    await client.patch("/admin/communication/settings", headers=headers, json={"email_enabled": True})
+    response = await client.post("/admin/communication/test", headers=headers,
+                                 json={"channel": "EMAIL", "recipient": "test@example.com"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "FAILED"
+    assert response.json()["details"] == "Brevo HTTP error: Invalid sender"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dev_enabled", [True, False])
+async def test_studio_communication_testing_access(db_session, client, auth_headers, monkeypatch, dev_enabled):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "DEV_TEST_LOGIN_ENABLED", dev_enabled)
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "")
+    studio = User(email=f"tester_{uuid.uuid4().hex[:8]}@studio.test", full_name="Studio Tester",
+                  role="STUDIO", is_active=True, is_verified=True)
+    db_session.add(studio)
+    await db_session.commit()
+    headers = auth_headers(studio)
+    expected = 200 if dev_enabled else 403
+    for path in ("settings", "audit-logs", "history"):
+        result = await client.get(f"/admin/communication/{path}", headers=headers)
+        assert result.status_code == expected
+    result = await client.patch("/admin/communication/settings", headers=headers,
+                                json={"email_enabled": False})
+    assert result.status_code == expected
+    result = await client.post("/admin/communication/test", headers=headers,
+                               json={"channel": "EMAIL", "recipient": studio.email})
+    assert result.status_code == expected
+    if dev_enabled:
+        assert result.json()["status"] == "SUPPRESSED"
+        logs = (await client.get("/admin/communication/audit-logs", headers=headers)).json()
+        assert logs[0]["changed_by_email"] == studio.email
+    # Local studio testing must not unlock budget administration or engine execution.
+    assert (await client.get("/admin/communication/budgets", headers=headers)).status_code == 403
+    assert (await client.post("/admin/communication/run-engine-cycle", headers=headers)).status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [None, "STUDENT", "TEACHER"])
+async def test_development_testing_still_requires_studio_login(db_session, client, auth_headers, monkeypatch, role):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "DEV_TEST_LOGIN_ENABLED", True)
+    headers = {}
+    if role:
+        user = User(email=f"restricted_{uuid.uuid4().hex[:8]}@test.local", full_name="Restricted User",
+                    role=role, is_active=True, is_verified=True)
+        db_session.add(user)
+        await db_session.commit()
+        headers = auth_headers(user)
+    response = await client.get("/admin/communication/settings", headers=headers)
+    assert response.status_code == (401 if role is None else 403)
+
+
+@pytest.mark.asyncio
+async def test_test_email_without_provider_key_is_simulated(db_session, client, auth_headers, monkeypatch):
+    from app.core.config import settings
+    from unittest.mock import patch, AsyncMock
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "")
+    admin = await get_or_create_superadmin(db_session)
+    headers = auth_headers(admin)
+    await client.patch("/admin/communication/settings", json={"email_enabled": True}, headers=headers)
+    with patch("app.modules.communication.service._dispatch_brevo_request", new_callable=AsyncMock) as dispatch:
+        response = await client.post("/admin/communication/test", json={"channel": "EMAIL", "recipient": "student@example.com"}, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "SIMULATED"
+    assert response.json()["success"] is False
+    dispatch.assert_not_awaited()

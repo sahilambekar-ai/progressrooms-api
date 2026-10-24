@@ -237,7 +237,7 @@ async def test_sandbox_payment_acceptance_flow(client, db_session, monkeypatch):
     roster_student = next((r for r in roster if r["student_id"] == str(student_user.id)), None)
     assert roster_student is not None
     assert roster_student["student_name"] == "Priya Patel"
-    assert roster_student["attendance_status"] == "UNMARKED"
+    assert roster_student["attendance_status"] == "SCHEDULED"
     assert roster_student["sessions_attended"] == 0
     assert roster_student["total_sessions"] == 5
 
@@ -308,7 +308,9 @@ async def test_sandbox_payment_acceptance_flow(client, db_session, monkeypatch):
     )
     assert cancel_res.status_code == 200, cancel_res.text
     cancel_data = cancel_res.json()
-    assert cancel_data["refunded"] is True
+    assert cancel_data["credit_preserved"] is True
+    assert "refunded" not in cancel_data
+    assert "No payment is returned" in cancel_data["message"]
     assert "session credit remains available" in cancel_data["message"]
 
     # Verify occurrence3 is no longer in student's upcoming classes (it is EXCUSED)

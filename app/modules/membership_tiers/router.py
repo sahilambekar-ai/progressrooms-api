@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, delete
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.organization import Organization, OrganizationMember
@@ -12,6 +13,27 @@ from app.modules.membership_tiers.schemas import MembershipTierCreate, Membershi
 from app.common.enums import UserRole
 
 router = APIRouter(prefix="/organizations/{org_id}/membership-tiers", tags=["Memberships & Passes"])
+
+async def resolve_packages(db, org_id, selections, existing=None):
+    resolved = []
+    seen = set()
+    for selection in selections:
+        key = (selection.session_id, selection.package_id)
+        if key in seen:
+            raise HTTPException(422, "A class package can only be included once")
+        seen.add(key)
+        session = await db.scalar(select(Session).options(selectinload(Session.pricing)).where(
+            Session.id == selection.session_id, Session.organization_id == org_id, Session.deleted_at.is_(None)))
+        saved = next((p for p in (existing or []) if p["session_id"] == str(selection.session_id) and p["package_id"] == str(selection.package_id)), None)
+        if session and saved:
+            resolved.append(saved.copy())
+            continue
+        package = next((p for p in (session.pricing.packages or []) if p["id"] == str(selection.package_id)), None) if session and session.pricing else None
+        if not package:
+            raise HTTPException(422, "A selected class package is unavailable. Refresh the class list.")
+        resolved.append({"session_id": str(session.id), "package_id": str(selection.package_id),
+                         "total_classes": package["total_classes"], "class_name": session.name})
+    return resolved
 
 async def get_tier_dict(db: AsyncSession, tier: MembershipTier) -> dict:
     c_stmt = (
@@ -38,6 +60,7 @@ async def get_tier_dict(db: AsyncSession, tier: MembershipTier) -> dict:
         "description": tier.description,
         "is_active": tier.is_active,
         "created_at": tier.created_at.isoformat() if tier.created_at else None,
+        "class_packages": tier.class_packages or [],
         "attached_classes": attached,
         "attached_class_ids": [c["id"] for c in attached]
     }
@@ -93,6 +116,7 @@ async def list_membership_tiers(
             "is_active": t.is_active,
             "deleted_at": t.deleted_at.isoformat() if t.deleted_at else None,
             "created_at": t.created_at.isoformat() if t.created_at else None,
+            "class_packages": t.class_packages or [],
             "attached_classes": attached,
             "attached_class_ids": [c["id"] for c in attached]
         })
@@ -105,6 +129,11 @@ async def create_membership_tier(
     tenant: tuple[Organization, OrganizationMember | None] = Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN])),
     db: AsyncSession = Depends(get_db)
 ):
+    selected_packages = await resolve_packages(db, org_id, payload.class_packages)
+    selected_ids = {uuid.UUID(p["session_id"]) for p in selected_packages}
+    if selected_packages and set(payload.class_ids) - selected_ids:
+        raise HTTPException(422, "Choose package options for every included class")
+    payload.class_ids = list(set(payload.class_ids) | selected_ids)
     slug = f"{payload.name.lower().replace(' ', '-')}-{uuid.uuid4().hex[:6]}"
     
     if payload.class_ids:
@@ -117,12 +146,13 @@ async def create_membership_tier(
         organization_id=org_id,
         name=payload.name,
         slug=slug,
-        tier_type=payload.tier_type,
+        tier_type="PACKAGE" if selected_packages else payload.tier_type,
         price=payload.price,
         offer_price=payload.offer_price,
         currency=payload.currency,
         validity_days=payload.validity_days,
-        total_classes=payload.total_classes,
+        total_classes=sum(p["total_classes"] for p in selected_packages) if selected_packages else payload.total_classes,
+        class_packages=selected_packages,
         description=payload.description,
         is_active=payload.is_active
     )
@@ -131,6 +161,9 @@ async def create_membership_tier(
 
     for cid in set(payload.class_ids):
         db.add(MembershipTierClass(tier_id=tier.id, session_id=cid))
+
+    if tier.class_packages:
+        tier.total_classes = sum(p["total_classes"] for p in tier.class_packages)
 
     await db.commit()
     return await get_tier_dict(db, tier)
@@ -167,12 +200,22 @@ async def update_membership_tier(
         tier.currency = payload.currency
     if payload.validity_days is not None:
         tier.validity_days = payload.validity_days
-    if payload.total_classes is not None:
+    if "total_classes" in payload.model_fields_set:
         tier.total_classes = payload.total_classes
-    if payload.description is not None:
+    if "description" in payload.model_fields_set:
         tier.description = payload.description
     if payload.is_active is not None:
         tier.is_active = payload.is_active
+
+    if payload.class_packages is not None:
+        selected_packages = await resolve_packages(db, org_id, payload.class_packages, tier.class_packages)
+        tier.class_packages = selected_packages
+        if selected_packages:
+            tier.tier_type = "PACKAGE"
+            tier.total_classes = sum(p["total_classes"] for p in selected_packages)
+            payload.class_ids = list({uuid.UUID(p["session_id"]) for p in selected_packages})
+    elif payload.class_ids is not None and tier.class_packages:
+        raise HTTPException(422, "Include class_packages when changing classes on a package pass")
 
     if payload.class_ids is not None:
         if payload.class_ids:
@@ -186,6 +229,9 @@ async def update_membership_tier(
 
         for cid in set(payload.class_ids):
             db.add(MembershipTierClass(tier_id=tier.id, session_id=cid))
+
+    if tier.class_packages:
+        tier.total_classes = sum(p["total_classes"] for p in tier.class_packages)
 
     await db.commit()
     return await get_tier_dict(db, tier)

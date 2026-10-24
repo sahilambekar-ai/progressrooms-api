@@ -1,3 +1,4 @@
+from app.common.purchase_policy import purchase_policy
 import uuid
 from pydantic import BaseModel, model_validator
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
@@ -16,11 +17,14 @@ router = APIRouter(prefix="/commerce", tags=["Commerce & Payments"])
 class CreateOrderPayload(BaseModel):
     session_id: uuid.UUID | None = None
     tier_id: uuid.UUID | None = None
+    package_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
     def one_offering(self):
         if bool(self.session_id) == bool(self.tier_id):
             raise ValueError("Choose one class or pass")
+        if self.package_id and not self.session_id:
+            raise ValueError("A package must belong to a class")
         return self
 
 class VerifyPaymentPayload(BaseModel):
@@ -38,10 +42,11 @@ async def create_order(
     if current_user.role != "STUDENT":
         raise HTTPException(403, "Please use a student account to purchase classes")
     try:
-        order = await CommerceService.create_order(db, current_user.id, payload.session_id, payload.tier_id)
+        order = await CommerceService.create_order(db, current_user.id, payload.session_id, payload.tier_id, payload.package_id)
         return {
             "order_id": str(order.id),
             "order_number": order.order_number,
+            "purchase_policy": purchase_policy(),
             "amount": float(order.total_amount),
             "currency": order.currency,
             "status": order.status,
@@ -156,6 +161,9 @@ async def razorpay_webhook(
         from decimal import Decimal
         order = await db.scalar(select(Order).where(Order.provider_order_id == entity.get("order_id")).with_for_update())
         if not order:
+            from app.models.saas_billing import SaaSCheckout
+            if await db.scalar(select(SaaSCheckout.id).where(SaaSCheckout.provider_order_id == entity.get("order_id"))):
+                return {"status": "handled_by_saas_billing_webhook"}
             raise HTTPException(404, "Order not found")
         if (entity.get("status") != "captured" or entity.get("amount") != int(Decimal(str(order.total_amount)) * 100)
             or entity.get("currency") != order.currency):

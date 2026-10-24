@@ -105,7 +105,7 @@ async def test_roster_only_reads_requested_attendance(db_session, monkeypatch):
         event.remove(db_session.bind.sync_engine, 'before_cursor_execute', record)
     assert len(statements) == 2  # authorized occurrence + joined roster
     assert {row['student_name']: row['attendance_status'] for row in rows} == {
-        'Learner 0': 'ABSENT', 'Learner 1': 'UNMARKED'}
+        'Learner 0': 'ABSENT', 'Learner 1': 'ATTENDED'}
 
 
 @pytest.mark.asyncio

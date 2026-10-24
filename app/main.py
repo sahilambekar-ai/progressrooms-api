@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
+from app.modules.zoom.router import router as zoom_router
 from app.modules.auth.router import router as auth_router
 from app.modules.organizations.router import router as org_router
 from app.modules.plans.router import router as plan_router
@@ -17,6 +18,7 @@ from app.modules.teachers.router import router as teachers_router
 from app.modules.admin.router import router as admin_router
 from app.modules.membership_tiers.router import router as membership_tiers_router
 from app.modules.billing.router import router as billing_router
+from app.modules.billing.saas_router import router as saas_billing_router
 from app.modules.support.router import router as support_router
 from app.modules.communication.router import router as communication_router
 
@@ -39,12 +41,14 @@ app.add_middleware(
 
 # Include Routers under API_V1_STR
 api_v1 = FastAPI()
+api_v1.include_router(zoom_router)
 api_v1.include_router(auth_router)
 api_v1.include_router(org_router)
 api_v1.include_router(plan_router)
 api_v1.include_router(class_router)
 api_v1.include_router(membership_tiers_router)
 api_v1.include_router(billing_router)
+api_v1.include_router(saas_billing_router)
 api_v1.include_router(schedule_router)
 api_v1.include_router(commerce_router)
 api_v1.include_router(attendance_router)
@@ -66,6 +70,6 @@ async def health_check():
 @app.get("/", tags=["Root"])
 async def root():
     return {
-        "message": "Welcome to ProgressRooms Multi-Tenant API",
+        "message": "Welcome to Progress Rooms Multi-Tenant API",
         "docs": f"{settings.API_V1_STR}/docs"
     }

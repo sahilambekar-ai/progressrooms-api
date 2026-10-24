@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.modules.teachers.codes import generate_teacher_code
+from app.modules.zoom.service import default_host_ready
 from app.models.user import User
 from app.models.otp import UserOtp
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent, OrganizationSetting
@@ -33,7 +35,9 @@ class AuthService:
         role: str = "STUDIO",
         studio_name: str | None = None,
         location: str | None = None,
-        privacy_policy_version: str | None = None
+        privacy_policy_version: str | None = None,
+        selected_plan: str = "starter",
+        billing_country: str | None = None
     ) -> tuple[str, str, str]:
         """
         Creates a new unverified user (and studio organization if role is studio),
@@ -68,6 +72,7 @@ class AuthService:
                 is_superadmin=False,
                 role=role,
                 location=location,
+                billing_country=billing_country,
                 is_verified=False,
                 account_status="PENDING_VERIFICATION"
             )
@@ -83,6 +88,8 @@ class AuthService:
             if location:
                 user.location = location
             user.role = role
+            if billing_country:
+                user.billing_country = billing_country
             user.account_status = "PENDING_VERIFICATION"
 
         # Setup Studio Organization if Studio/Instructor role
@@ -90,8 +97,8 @@ class AuthService:
             mem_stmt = select(OrganizationMember, Organization).join(Organization).where(OrganizationMember.user_id == user.id, OrganizationMember.is_active == True)
             existing_mem_row = (await db.execute(mem_stmt)).first()
             if not existing_mem_row:
-                org_display_name = (studio_name.strip() if studio_name else f"{full_name.strip()} Sanctuary")
-                base_slug = re.sub(r'[^a-z0-9]+', '-', org_display_name.lower()).strip('-') or "sanctuary"
+                org_display_name = (studio_name.strip() if studio_name else f"{full_name.strip()} Studio")
+                base_slug = re.sub(r'[^a-z0-9]+', '-', org_display_name.lower()).strip('-') or "studio"
                 slug = f"{base_slug}-{uuid.uuid4().hex[:6]}"
                 new_org = Organization(
                     name=org_display_name,
@@ -108,7 +115,9 @@ class AuthService:
                     user_id=user.id,
                     role="STUDIO",
                     title="Studio Founder & Lead Guide",
-                    bio="Lead instructor and sanctuary director.",
+                    can_teach=True,
+                    teacher_code=await generate_teacher_code(db),
+                    bio="Lead instructor and studio director.",
                     is_active=True
                 )
                 db.add(new_member)
@@ -118,14 +127,19 @@ class AuthService:
                     phone=phone.strip() if phone else None,
                     support_phone=phone.strip() if phone else None,
                     support_email=email_clean,
+                    country="India" if billing_country == "IN" else billing_country,
                     account_completed=False,
                     completion_step=1
                 )
                 db.add(new_settings)
+                from app.modules.billing.saas import initialize_subscription
+                await initialize_subscription(db, new_org.id, selected_plan)
             else:
                 existing_mem, existing_org = existing_mem_row
                 if studio_name and studio_name.strip():
                     existing_org.name = studio_name.strip()
+                from app.modules.billing.saas import initialize_subscription
+                await initialize_subscription(db, existing_org.id, selected_plan)
         # Generate Email Verification OTP
         otp_code = f"{secrets.randbelow(900000) + 100000}"
 
@@ -196,6 +210,8 @@ class AuthService:
 
         if not user:
             raise HTTPException(404, "Account not found. Please register first.")
+        elif user.role == "TEACHER":
+            raise HTTPException(403, "Use the credentials provided by your Studio; teacher OTP is disabled")
         elif not getattr(user, "is_verified", False) or user.account_status == "PENDING_VERIFICATION":
             is_verified = False
             requires_activation = True
@@ -260,6 +276,9 @@ class AuthService:
                 detail="User with this email not found."
             )
 
+        if user.role == "TEACHER":
+            raise HTTPException(403, "Teacher verification is managed by Studio; use your Studio-issued password")
+
         # Allow verifying either LOGIN_VERIFICATION or EMAIL_VERIFICATION
         otp_stmt = (
             select(UserOtp)
@@ -309,6 +328,13 @@ class AuthService:
             raise HTTPException(403, "Account access is disabled")
 
         # Activate user account
+        if not user.is_verified and user.role == "STUDIO":
+            from app.modules.billing.saas import start_verified_trial
+            org_ids = (await db.scalars(select(OrganizationMember.organization_id).where(
+                OrganizationMember.user_id == user.id, OrganizationMember.role == "STUDIO",
+                OrganizationMember.is_active.is_(True)))).all()
+            for org_id in sorted(org_ids):
+                await start_verified_trial(db, org_id)
         user.is_verified = True
         user.account_status = "ACTIVE"
         user.last_login_at = now
@@ -412,7 +438,7 @@ class AuthService:
                 account_completed = org_settings.account_completed
                 completion_step = org_settings.completion_step
                 completion_percentage = org_settings.completion_percentage
-                zoom_connected = org_settings.zoom_connected
+                zoom_connected = await default_host_ready(db, org.id)
             else:
                 new_settings = OrganizationSetting(
                     organization_id=org.id,

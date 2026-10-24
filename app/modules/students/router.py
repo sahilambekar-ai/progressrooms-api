@@ -97,7 +97,7 @@ async def update_student(record_id: uuid.UUID, payload: StudentUpdate,
         if payload.teacher_member_id:
             teacher = await db.scalar(select(OrganizationMember).where(
                 OrganizationMember.id == payload.teacher_member_id, OrganizationMember.organization_id == org.id,
-                OrganizationMember.role == "TEACHER", OrganizationMember.is_active == True))
+                OrganizationMember.can_teach.is_(True), OrganizationMember.is_active == True))
             if not teacher:
                 raise HTTPException(422, "Choose an active teacher from this studio")
         record.teacher_member_id = payload.teacher_member_id
@@ -133,7 +133,7 @@ async def add_registered_student(payload: AddStudent, current_user: User = Depen
     teacher = None
     if payload.teacher_member_id:
         teacher = await db.scalar(select(OrganizationMember).where(OrganizationMember.id == payload.teacher_member_id,
-            OrganizationMember.organization_id == org.id, OrganizationMember.role == "TEACHER", OrganizationMember.is_active == True))
+            OrganizationMember.organization_id == org.id, OrganizationMember.can_teach.is_(True), OrganizationMember.is_active == True))
         if not teacher:
             raise HTTPException(422, "Choose an active teacher from this studio")
     record = await db.scalar(select(OrganizationStudent).where(OrganizationStudent.organization_id == org.id,
@@ -148,7 +148,7 @@ async def add_registered_student(payload: AddStudent, current_user: User = Depen
     if not existing:
         count = await db.scalar(select(func.count(SessionEnrollment.id)).where(
             SessionEnrollment.session_id == cls.id, SessionEnrollment.status == "ACTIVE")) or 0
-        if count >= cls.capacity:
+        if cls.capacity is not None and count >= cls.capacity:
             raise HTTPException(409, "Class is full")
         pricing = await db.scalar(select(SessionPricing).where(SessionPricing.session_id == cls.id))
         db.add(SessionEnrollment(organization_id=org.id, session_id=cls.id, user_id=student.id,
@@ -232,4 +232,4 @@ async def change_enrollment_pause(record_id: uuid.UUID, enrollment_id: uuid.UUID
         enrollment.paused_at = None
         enrollment.status = "ACTIVE"
     await db.commit()
-    return {"message": "Pass cancelled" if action == "cancel" else "Pass paused" if action == "pause" else "Pass resumed"}
+    return {"message": "Pass cancelled. No payment is returned." if action == "cancel" else "Pass paused" if action == "pause" else "Pass resumed"}

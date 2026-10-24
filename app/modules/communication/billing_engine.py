@@ -66,7 +66,7 @@ async def notify_student_payment_received(
 ) -> Dict[str, Any]:
     """
     Dispatches a payment confirmation notice to a student upon successful booking checkout.
-    Uses the ProgressRooms Admin WhatsApp sender and Brevo transactional email.
+    Uses the Progress Rooms Admin WhatsApp sender and Brevo transactional email.
     """
     order = await db.get(Order, order_id)
     if not order:
@@ -75,7 +75,7 @@ async def notify_student_payment_received(
 
     student = await db.get(User, order.user_id)
     org = await db.get(Organization, order.organization_id)
-    studio_name = org.name if org else "ProgressRooms Studio"
+    studio_name = org.name if org else "Progress Rooms Studio"
 
     # Find payment reference
     payment_stmt = select(Payment).where(Payment.order_id == order_id).order_by(desc(Payment.created_at)).limit(1)
@@ -205,7 +205,7 @@ async def notify_studio_invoice_issued(
     Sends platform subscription invoice notice to studio billing contacts.
     """
     org = await db.get(Organization, organization_id)
-    studio_name = org.name if org else "Studio Sanctuary"
+    studio_name = org.name if org else "Studio"
     contacts = await get_studio_billing_contacts(db, organization_id)
 
     if not contacts:
@@ -337,7 +337,7 @@ async def notify_studio_payment_due_soon(
     Checks payment status immediately before sending; if already paid, skips dispatch.
     """
     org = await db.get(Organization, organization_id)
-    studio_name = org.name if org else "Studio Sanctuary"
+    studio_name = org.name if org else "Studio"
     contacts = await get_studio_billing_contacts(db, organization_id)
 
     public_origin = getattr(settings, "WEBSITE_PUBLIC_ORIGIN", "http://localhost:3000")
@@ -458,7 +458,7 @@ async def notify_studio_payment_overdue(
     Sends 'Payment overdue' notice (proposed default: 3 days after due date).
     """
     org = await db.get(Organization, organization_id)
-    studio_name = org.name if org else "Studio Sanctuary"
+    studio_name = org.name if org else "Studio"
     contacts = await get_studio_billing_contacts(db, organization_id)
 
     public_origin = getattr(settings, "WEBSITE_PUBLIC_ORIGIN", "http://localhost:3000")
@@ -577,7 +577,7 @@ async def notify_studio_payment_received(
     Sends platform subscription payment confirmation notice to studio billing contacts.
     """
     org = await db.get(Organization, organization_id)
-    studio_name = org.name if org else "Studio Sanctuary"
+    studio_name = org.name if org else "Studio"
     contacts = await get_studio_billing_contacts(db, organization_id)
 
     public_origin = getattr(settings, "WEBSITE_PUBLIC_ORIGIN", "http://localhost:3000")
@@ -689,17 +689,24 @@ async def process_billing_reminders(
     current_time: Optional[datetime] = None
 ) -> Dict[str, Any]:
     """
-    Periodically processes studio subscription due dates:
-    - 3 days before due date: Sends 'Payment due soon'.
-    - 3 days after due date: Sends 'Payment overdue'.
-    - Critical Rule: Checks payment status immediately before sending.
-      Stops pending due reminders when payment is confirmed.
+    Generate fixed platform usage statements for completed months.
+    Payment collection and due/overdue reminder dispatch are not implemented here.
     """
     now = current_time or datetime.now(timezone.utc)
-    # This engine checks active studios and dispatches relevant due reminders
-    # In full production, this hooks into the studio subscription billing ledger table.
+    from sqlalchemy import select
+    from app.models.organization import Organization
+    from app.modules.billing.platform import finalize_months
+    generated = 0
+    orgs = (await db.scalars(select(Organization).where(Organization.deleted_at.is_(None)).order_by(Organization.id))).all()
+    for org in orgs:
+        await db.execute(select(Organization.id).where(Organization.id == org.id).with_for_update())
+        generated += await finalize_months(db, org, now)
+    await db.commit()
+    # Month-end usage statements are generated above. Payment collection and
+    # paid/overdue reminder state are separate from this usage ledger.
     return {
         "processed_at": now.isoformat(),
+        "platform_invoices_generated": generated,
         "due_soon_sent": 0,
         "overdue_sent": 0,
         "suppressed_already_paid": 0

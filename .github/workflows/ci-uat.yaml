@@ -28,6 +28,7 @@ jobs:
       BREVO_ENABLED: "false"
       DATABASE_URL: postgresql+asyncpg://postgres:ci-only-password@127.0.0.1:5432/progressrooms_ci
       SYNC_DATABASE_URL: postgresql://postgres:ci-only-password@127.0.0.1:5432/progressrooms_ci
+      ZOOM_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:ci-only-password@127.0.0.1:5432/progressrooms_ci
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,7 +46,9 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
       - name: Verify deployment script syntax
-        run: bash -n deploy/uat.sh
+        run: |
+          bash -n deploy/uat.sh
+          sh -n deploy/start-api.sh
       - name: Build API image
         run: docker build --tag progressrooms-api-ci:${{ github.sha }} .
 

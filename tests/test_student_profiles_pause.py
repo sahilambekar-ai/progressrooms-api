@@ -6,7 +6,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from app.main import app, api_v1
 from app.core.database import get_db
-from app.core.security import create_access_token
+from app.core.security import create_access_token, get_password_hash
 from app.models.user import User
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent
 from app.models.session import Session, ClassType
@@ -121,10 +121,11 @@ async def test_cancel_pass_marks_student_inactive(client, db_session, roster):
 async def test_deactivating_teacher_deactivates_assigned_classes(client, db_session, roster):
     owner, teacher, _, _, record, _, _, cls = roster
     from app.models.session import SessionInstructor
+    owner.password_hash = get_password_hash("studio-password")
     teacher_member = await db_session.scalar(select(OrganizationMember).where(OrganizationMember.user_id == teacher.id))
     db_session.add(SessionInstructor(session_id=cls.id, member_id=teacher_member.id, role="PRIMARY"))
     await db_session.commit()
-    response = await client.put(f"teachers/{teacher_member.id}", headers=auth(owner), json={"is_active": False})
+    response = await client.put(f"teachers/{teacher_member.id}", headers=auth(owner), json={"is_active": False, "studio_password": "studio-password"})
     assert response.status_code == 200, response.text
     await db_session.refresh(teacher_member); await db_session.refresh(cls)
     assert not teacher_member.is_active and not cls.is_active
@@ -134,7 +135,7 @@ async def test_deactivating_teacher_deactivates_assigned_classes(client, db_sess
 async def test_registration_requires_phone_and_stores_whatsapp(client, db_session, monkeypatch):
     async def no_email(**kwargs): pass
     monkeypatch.setattr("app.modules.auth.service.send_otp_email", no_email)
-    body=dict(full_name="Student", email=f"{uuid.uuid4().hex}@example.com", password="long-password", location="Pune", role="STUDENT", privacy_accepted=True, privacy_policy_version="2026-09-27")
+    body=dict(full_name="Student", email=f"{uuid.uuid4().hex}@example.com", password="long-password", location="Pune", role="STUDENT", privacy_accepted=True, privacy_policy_version="2026-10-21")
     for phone in [None, "", "123", "not a phone"]:
         assert (await client.post("auth/register", json={**body,"phone":phone})).status_code == 422
     response=await client.post("auth/register", json={**body,"phone":"+91 98765 43210", "whatsapp_number":"+91 91234 56789"})

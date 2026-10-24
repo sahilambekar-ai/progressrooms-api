@@ -69,8 +69,8 @@ def get_connection_status() -> ConnectionStatusResponse:
     """
     Inspects provider credentials and effective status for all three platform channels:
     - Brevo Email API
-    - ProgressRooms Admin WhatsApp Sender
-    - ProgressRooms Classes WhatsApp Sender
+    - Progress Rooms Admin WhatsApp Sender
+    - Progress Rooms Classes WhatsApp Sender
     """
     brevo_key = getattr(settings, "BREVO_API_KEY", "")
     brevo_configured = bool(brevo_key and len(brevo_key.strip()) > 5)
@@ -80,10 +80,10 @@ def get_connection_status() -> ConnectionStatusResponse:
         configured=brevo_configured,
         status="CONNECTED" if brevo_configured else "NOT_CONFIGURED",
         details="Brevo REST API v3 configured" if brevo_configured else "BREVO_API_KEY is not configured",
-        sender_identity=f"{getattr(settings, 'BREVO_SENDER_NAME', 'ProgressRooms')} <{brevo_sender}>"
+        sender_identity=f"{getattr(settings, 'BREVO_SENDER_NAME', 'Progress Rooms')} <{brevo_sender}>"
     )
 
-    # WhatsApp Admin Sender (ProgressRooms Admin)
+    # WhatsApp Admin Sender (Progress Rooms Admin)
     wa_admin_num = getattr(settings, "WHATSAPP_ADMIN_NUMBER", "+91 98765 00001")
     wa_token = getattr(settings, "WHATSAPP_API_TOKEN", "")
     wa_admin_configured = bool(wa_token and len(wa_token.strip()) > 5)
@@ -92,10 +92,10 @@ def get_connection_status() -> ConnectionStatusResponse:
         configured=wa_admin_configured,
         status="CONNECTED" if wa_admin_configured else "READY_FOR_SETUP",
         details="Meta WhatsApp Cloud API configured for Admin sender" if wa_admin_configured else "Meta Cloud API credentials pending; ready for verification",
-        sender_identity=f"ProgressRooms Admin ({wa_admin_num})"
+        sender_identity=f"Progress Rooms Admin ({wa_admin_num})"
     )
 
-    # WhatsApp Classes Sender (ProgressRooms Classes)
+    # WhatsApp Classes Sender (Progress Rooms Classes)
     wa_classes_num = getattr(settings, "WHATSAPP_CLASSES_NUMBER", "+91 98765 00002")
     wa_classes_configured = bool(wa_token and len(wa_token.strip()) > 5)
 
@@ -103,7 +103,7 @@ def get_connection_status() -> ConnectionStatusResponse:
         configured=wa_classes_configured,
         status="CONNECTED" if wa_classes_configured else "READY_FOR_SETUP",
         details="Meta WhatsApp Cloud API configured for Classes sender" if wa_classes_configured else "Meta Cloud API credentials pending; ready for verification",
-        sender_identity=f"ProgressRooms Classes ({wa_classes_num})"
+        sender_identity=f"Progress Rooms Classes ({wa_classes_num})"
     )
 
     return ConnectionStatusResponse(
@@ -190,16 +190,16 @@ async def send_test_message(
     target_channel = payload.channel.upper().strip()
     recipient = payload.recipient.strip()
 
-    subject = "[TEST] ProgressRooms Operational Notification Test"
+    subject = "[TEST] Progress Rooms Operational Notification Test"
     custom_note = payload.message.strip() if payload.message else "Routine channel verification test."
     body_text = (
-        f"[TEST MESSAGE - ProgressRooms Notification Engine]\n\n"
+        f"[TEST MESSAGE - Progress Rooms Notification Engine]\n\n"
         f"Channel: {target_channel}\n"
         f"Recipient: {recipient}\n"
         f"Dispatched by: {admin_user.full_name} ({admin_user.email})\n"
         f"Scope: Applies to all studios\n"
         f"Note: {custom_note}\n\n"
-        f"This test confirms operational routing between ProgressRooms and delivery providers."
+        f"This test confirms operational routing between Progress Rooms and delivery providers."
     )
 
     # 1. Enforcement of channel toggles
@@ -238,12 +238,12 @@ async def send_test_message(
             }
             send_payload = {
                 "sender": {
-                    "name": getattr(settings, "BREVO_SENDER_NAME", "ProgressRooms"),
+                    "name": getattr(settings, "BREVO_SENDER_NAME", "Progress Rooms"),
                     "email": getattr(settings, "BREVO_SENDER_EMAIL", "sahilambekar.dev@gmail.com")
                 },
                 "to": [{"email": recipient, "name": "Authorized Test Recipient"}],
                 "subject": subject,
-                "htmlContent": f"<div style='font-family:sans-serif;padding:20px;border:2px dashed #81A882;border-radius:8px;'><h3 style='color:#0C2417;'>🌿 ProgressRooms Notification Test</h3><p>{body_text.replace(chr(10), '<br>')}</p></div>"
+                "htmlContent": f"<div style='font-family:sans-serif;padding:20px;border:2px dashed #81A882;border-radius:8px;'><h3 style='color:#0C2417;'>🌿 Progress Rooms Notification Test</h3><p>{body_text.replace(chr(10), '<br>')}</p></div>"
             }
             try:
                 status_code, json_data, text_data = await _dispatch_brevo_request(headers=headers, payload=send_payload)
@@ -270,7 +270,7 @@ async def send_test_message(
                         details="Test email successfully dispatched via Brevo."
                     )
                 else:
-                    err_msg = resp.text
+                    err_msg = text_data
                     log_entry = CommunicationLog(
                         recipient_user_id=admin_user.id,
                         recipient_email=recipient,
@@ -319,7 +319,7 @@ async def send_test_message(
                 recipient_email=recipient,
                 channel="EMAIL",
                 message_type="TEST_MESSAGE",
-                status="SENT",
+                status="SIMULATED",
                 subject_or_title=subject,
                 body_preview=body_text[:200],
                 metadata_json={"simulated": True, "message_id": msg_id}
@@ -327,10 +327,10 @@ async def send_test_message(
             db.add(log_entry)
             await db.commit()
             return CommunicationTestResponse(
-                success=True,
+                success=False,
                 channel=target_channel,
                 recipient=recipient,
-                status="SENT",
+                status="SIMULATED",
                 message_id=msg_id,
                 details="Test email simulated in local development (BREVO_API_KEY is unset)."
             )
@@ -367,7 +367,7 @@ async def send_test_message(
             recipient_phone=recipient,
             channel=target_channel,
             message_type="TEST_MESSAGE",
-            status="SENT",
+            status="SIMULATED",
             subject_or_title=subject,
             body_preview=body_text[:200],
             metadata_json={"simulated": True, "sender_channel": target_channel, "message_id": msg_id}
@@ -375,12 +375,12 @@ async def send_test_message(
         db.add(log_entry)
         await db.commit()
         return CommunicationTestResponse(
-            success=True,
+            success=False,
             channel=target_channel,
             recipient=recipient,
-            status="SENT",
+            status="SIMULATED",
             message_id=msg_id,
-            details=f"Test message routed through ProgressRooms {target_channel.replace('_', ' ').title()}."
+            details="WhatsApp test simulated; provider delivery is not connected."
         )
 
     else:
@@ -425,7 +425,7 @@ async def check_and_increment_studio_budget(
 ) -> tuple[bool, str | None]:
     """
     Evaluates whether an outbound message can be sent within the studio's monthly budget.
-    Platform billing messages have organization_id=None and are paid directly by ProgressRooms platform.
+    Platform billing messages have organization_id=None and are paid directly by Progress Rooms platform.
 
     Returns:
         (True, None) if allowed and usage is recorded
