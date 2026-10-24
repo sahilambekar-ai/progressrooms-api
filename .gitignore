@@ -29,6 +29,7 @@ ENV/
 !.env.example
 !.env.zoom.example
 !.env.saas.example
+!.env.validation.example
 .pytest_cache/
 .coverage
 htmlcov/
@@ -38,3 +39,6 @@ uploads/
 
 # Private previews and immutable published site versions
 generated-websites/
+
+# Private validation credentials and deployment seed secrets
+private-validation/

@@ -46,7 +46,9 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
       - name: Verify deployment script syntax
-        run: bash -n deploy/uat.sh
+        run: |
+          bash -n deploy/uat.sh
+          sh -n deploy/start-api.sh
       - name: Build API image
         run: docker build --tag progressrooms-api-ci:${{ github.sha }} .
 

@@ -101,3 +101,47 @@ the new container may be running but unhealthy. Do not assume the old API was
 automatically restored. For a schema-compatible rollback, use a known previous
 image tag and its matching Compose file from backups; restart only `api` with
 `up -d --no-deps --wait api`. Do not downgrade the database automatically.
+
+
+## Automatic validation tenants (UAT and production images)
+
+The image runs `app.validation_seed` before starting the API. It is a no-op by default.
+To enable it, install the private environment-specific settings from `private-validation/uat.env`
+or `private-validation/prod.env` into the deployment's `api.env` (do not commit these files).
+The tracked `.env.validation.example` documents the variable names. Keep each environment's
+seed secret unchanged; never use the UAT secret in production. This configuration is a one-time
+server setup. Afterward, every API container start automatically adds missing validation data.
+Migrations must already have run. The UAT deployment script runs them before starting the image.
+No production deployment workflow is added: the production image has the same startup behavior
+when the user promotes and deploys it.
+
+Dataset: two standalone teachers with 10 students each; Lotus Studio with an owner,
+5 teachers and 20 students; Rhythm Academy with an owner, 4 teachers and 15 students.
+Each teaching member has a private course, Monday/Wednesday/Friday timetable, 14 days of
+attendance history and 28 days of upcoming classes. Each studio's last two students have
+paused/expired enrollment scenarios. Seed users are verified for password login, never superadmins.
+Synthetic studios have complimentary, unmanaged Core/Studio access, not fabricated Razorpay payments.
+All recipients opt out of operational notifications; no phone numbers, real Zoom authorizations,
+payment accounts or public courses are created.
+
+The script uses stable IDs, a transaction and a PostgreSQL advisory lock. Re-running it does not
+reset passwords, names, enrollment states or existing attendance. It adds missing dates; old data
+is retained. To turn off future seed runs, set `VALIDATION_SEED_ENABLED=false`; this preserves
+existing validation data and accounts.
+
+Private credentials are regenerated at `/app/data/validation-credentials.md` (mode 0600).
+The current UAT compose mounts `/app/data` on the persistent `api_data` volume.
+Use an equivalent private persistent volume on production. For manual execution after migration:
+
+```sh
+python -m app.validation_seed
+```
+
+To generate the credential document from the environment without changing the database:
+
+```sh
+python -m app.validation_seed --credentials-only
+```
+
+The document lists initial credentials. Passwords changed by testers are not reset by the seed.
+Never publish that document as a web asset, CI artifact, Git commit or log output.
