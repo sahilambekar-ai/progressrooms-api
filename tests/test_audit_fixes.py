@@ -475,9 +475,12 @@ async def test_public_session_buying_information(client, db_session):
     assert data["next_occurrence"]["id"] == str(occ.id)
     assert data["availability"]["capacity"] == 20
     assert data["availability"]["remaining_spots"] == 20
-    assert "no payment is returned" in data["cancellation_terms"]
-    assert data["purchase_policy"]["refunds_supported"] is False
-    assert "non-refundable" in data["purchase_policy"]["terms"]
+    assert "at least 2 hours before class start" in data["cancellation_terms"]
+    assert "Unused session credits remain available within the pass validity" in data["cancellation_terms"]
+    assert data["purchase_policy"]["version"]
+    assert data["purchase_policy"]["terms"] == data["cancellation_terms"]
+    assert "refunds_supported" not in data["purchase_policy"]
+    assert "refund" not in data["purchase_policy"]["terms"].lower()
     assert "Zoom video room" in data["meeting_readiness"]
     assert "No auto-recurring" in data["renewal_terms"]
 

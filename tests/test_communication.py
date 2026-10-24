@@ -129,7 +129,7 @@ async def test_communication_channel_toggles_and_audit_logging(db_session, clien
 
 
 @pytest.mark.asyncio
-async def test_channel_switch_suppression_and_test_dispatch(db_session, client, auth_headers):
+async def test_channel_switch_suppression_and_test_dispatch(db_session, client, auth_headers, monkeypatch):
     """
     Verifies that switching a channel off suppresses test dispatches and logs
     the exact reason ('Suppressed: email disabled' / 'Suppressed: whatsapp disabled').
@@ -165,6 +165,10 @@ async def test_channel_switch_suppression_and_test_dispatch(db_session, client, 
     assert res_wa_data["status"] == "SUPPRESSED"
     assert res_wa_data["suppression_reason"] == "Suppressed: whatsapp disabled"
 
+    # Provider credentials are explicit so this test does not depend on a local .env.
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "unit-test-key-not-a-real-credential")
+
     # 3. Turn Email back ON -> Test email succeeds (SENT)
     await client.patch(
         "/admin/communication/settings",
@@ -172,12 +176,13 @@ async def test_channel_switch_suppression_and_test_dispatch(db_session, client, 
         headers=auth_headers(superadmin),
     )
     from unittest.mock import patch, AsyncMock
-    with patch("app.modules.communication.service._dispatch_brevo_request", new_callable=AsyncMock, return_value=(200, {"messageId": "test_msg_ok_123"}, "ok")):
+    with patch("app.modules.communication.service._dispatch_brevo_request", new_callable=AsyncMock, return_value=(200, {"messageId": "test_msg_ok_123"}, "ok")) as dispatch:
         test_email_on = await client.post(
             "/admin/communication/test",
             json={"channel": "EMAIL", "recipient": "student@example.com"},
             headers=auth_headers(superadmin),
         )
+    dispatch.assert_awaited_once()
     assert test_email_on.status_code == 200
     assert test_email_on.json()["status"] == "SENT"
 
@@ -322,3 +327,19 @@ async def test_development_testing_still_requires_studio_login(db_session, clien
         headers = auth_headers(user)
     response = await client.get("/admin/communication/settings", headers=headers)
     assert response.status_code == (401 if role is None else 403)
+
+
+@pytest.mark.asyncio
+async def test_test_email_without_provider_key_is_simulated(db_session, client, auth_headers, monkeypatch):
+    from app.core.config import settings
+    from unittest.mock import patch, AsyncMock
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "")
+    admin = await get_or_create_superadmin(db_session)
+    headers = auth_headers(admin)
+    await client.patch("/admin/communication/settings", json={"email_enabled": True}, headers=headers)
+    with patch("app.modules.communication.service._dispatch_brevo_request", new_callable=AsyncMock) as dispatch:
+        response = await client.post("/admin/communication/test", json={"channel": "EMAIL", "recipient": "student@example.com"}, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "SIMULATED"
+    assert response.json()["success"] is False
+    dispatch.assert_not_awaited()
