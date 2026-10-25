@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent
 from app.models.user import User
+from app.models.audit import AuditLog
 from app.models.commerce import Order
 from app.models.plan import OrganizationSubscription
 from app.modules.auth.dependencies import require_superadmin
@@ -41,8 +42,8 @@ async def get_admin_metrics(
         "total_users": users_count or 0,
         "total_platform_revenue": float(orders_sum or 0.0),
         "active_subscriptions": subs_count or 0,
-        "status": "healthy",
-        "system_status": "All Systems Operational"
+        "status": "unknown",
+        "system_status": "See measured server telemetry"
     }
 
 @router.get("/organizations")
@@ -183,6 +184,7 @@ async def list_all_instructors(
         select(OrganizationMember, User, Organization)
         .join(User, User.id == OrganizationMember.user_id)
         .join(Organization, Organization.id == OrganizationMember.organization_id)
+        .where(User.deleted_at.is_(None), Organization.deleted_at.is_(None), OrganizationMember.can_teach.is_(True))
     )
 
     # Search filter
@@ -279,3 +281,76 @@ async def instructor_zoom_impact(member_id: uuid.UUID, admin: User = Depends(req
         raise HTTPException(404, "Instructor not found")
     from app.modules.zoom.service import impact
     return await impact(db, member.organization_id, member.id)
+
+
+from datetime import datetime, timezone
+from pydantic import BaseModel
+from typing import Literal
+
+class StudioState(BaseModel):
+    status: Literal["ACTIVE", "SUSPENDED"]
+
+@router.patch("/organizations/{org_id}/status")
+async def set_studio_status(org_id: uuid.UUID, payload: StudioState,
+    admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+    org = await db.get(Organization, org_id)
+    if not org or org.deleted_at:
+        raise HTTPException(404, "Studio not found")
+    db.add(AuditLog(user_id=admin.id, organization_id=org.id, entity_type="studio", entity_id=org.id, action="SET_STATUS", old_data={"status": org.status}, new_data={"status": payload.status}))
+    org.status = payload.status
+    await db.commit()
+    return {"status": org.status}
+
+@router.delete("/organizations/{org_id}")
+async def delete_studio(org_id: uuid.UUID, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+    org = await db.get(Organization, org_id)
+    if not org or org.deleted_at:
+        raise HTTPException(404, "Studio not found")
+    org.status = "SUSPENDED"
+    db.add(AuditLog(user_id=admin.id, organization_id=org.id, entity_type="studio", entity_id=org.id, action="SOFT_DELETE"))
+    org.deleted_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"message": "Studio deleted; historical records retained"}
+
+@router.get("/people")
+async def list_people(role: Literal["TEACHER", "STUDENT"], search: str = "",
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+    stmt = select(User).where(User.role == role, User.deleted_at.is_(None))
+    if search.strip():
+        term = f"%{search.strip().lower()}%"
+        stmt = stmt.where(or_(func.lower(User.full_name).like(term), func.lower(User.email).like(term)))
+    count = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    users = (await db.scalars(stmt.order_by(User.created_at.desc(), User.id).offset((page-1)*page_size).limit(page_size))).all()
+    ids = [u.id for u in users]
+    association = OrganizationMember if role == "TEACHER" else OrganizationStudent
+    studios = {}
+    if ids:
+        rows = (await db.execute(select(association.user_id, Organization.name).join(Organization,
+            Organization.id == association.organization_id).where(association.user_id.in_(ids), Organization.deleted_at.is_(None)))).all()
+        for user_id, name in rows:
+            studios.setdefault(user_id, []).append(name)
+    fields = ("full_name", "email", "phone", "whatsapp_number", "address", "location", "account_status", "is_verified", "created_at")
+    return {"items": [dict(id=str(u.id), **{f: getattr(u, f) for f in fields}, studios=studios.get(u.id, [])) for u in users],
+        "total_items": count, "total_pages": max(1, math.ceil(count/page_size)), "page": page}
+
+@router.delete("/people/{user_id}")
+async def delete_person(user_id: uuid.UUID, admin: User = Depends(require_superadmin), db: AsyncSession = Depends(get_db)):
+    user = await db.scalar(select(User).where(User.id == user_id).with_for_update())
+    if not user or user.deleted_at:
+        raise HTTPException(404, "Account not found")
+    if user.role not in {"TEACHER", "STUDENT"}:
+        raise HTTPException(409, "Only teacher and student accounts can be deleted here")
+    if user.role == "TEACHER":
+        members = (await db.scalars(select(OrganizationMember).where(OrganizationMember.user_id == user.id)
+            .order_by(OrganizationMember.organization_id))).all()
+        for member in members:
+            await protect_teaching_roster(db, member)
+            from app.modules.zoom.service import disconnect
+            await disconnect(db, member, pause_confirmed=True, commit=False)
+            member.is_active = False
+    db.add(AuditLog(user_id=admin.id, entity_type="user", entity_id=user.id, action="SOFT_DELETE"))
+    user.is_active = False
+    user.deleted_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"message": "Account deleted; historical records retained"}

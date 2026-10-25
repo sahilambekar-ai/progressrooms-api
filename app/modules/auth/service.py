@@ -94,7 +94,7 @@ class AuthService:
 
         # Setup Studio Organization if Studio/Instructor role
         if role == "STUDIO":
-            mem_stmt = select(OrganizationMember, Organization).join(Organization).where(OrganizationMember.user_id == user.id, OrganizationMember.is_active == True)
+            mem_stmt = select(OrganizationMember, Organization).join(Organization).where(OrganizationMember.user_id == user.id, OrganizationMember.is_active == True, Organization.status == "ACTIVE", Organization.deleted_at.is_(None))
             existing_mem_row = (await db.execute(mem_stmt)).first()
             if not existing_mem_row:
                 org_display_name = (studio_name.strip() if studio_name else f"{full_name.strip()} Studio")
@@ -327,6 +327,8 @@ class AuthService:
         if not user.is_active or user.deleted_at or user.account_status in {"SUSPENDED", "DISABLED"}:
             raise HTTPException(403, "Account access is disabled")
 
+        await require_active_staff_studio(db, user)
+
         # Activate user account
         if not user.is_verified and user.role == "STUDIO":
             from app.modules.billing.saas import start_verified_trial
@@ -384,6 +386,8 @@ class AuthService:
                 detail=f"Account is {user.account_status}. Please contact support."
             )
 
+        await require_active_staff_studio(db, user)
+
         # Check if user is verified
         if not user.is_verified or user.account_status == "PENDING_VERIFICATION":
             otp_code, record_id, _, _, msg = await AuthService.request_otp(
@@ -419,7 +423,7 @@ class AuthService:
 
         mem_stmt = select(OrganizationMember, Organization).join(
             Organization, Organization.id == OrganizationMember.organization_id
-        ).where(OrganizationMember.user_id == user.id, OrganizationMember.is_active == True)
+        ).where(OrganizationMember.user_id == user.id, OrganizationMember.is_active == True, Organization.status == "ACTIVE", Organization.deleted_at.is_(None))
         mem_res = await db.execute(mem_stmt)
         mem_row = mem_res.first()
         if user.role == "TEACHER" and not mem_row:
@@ -575,3 +579,13 @@ class AuthService:
         await db.commit()
 
         return "Password has been reset successfully. You can now log in."
+
+
+async def require_active_staff_studio(db, user):
+    if user.role not in {"STUDIO", "TEACHER"}:
+        return
+    member = await db.scalar(select(OrganizationMember.id).join(Organization).where(
+        OrganizationMember.user_id == user.id, OrganizationMember.role == user.role,
+        OrganizationMember.is_active.is_(True), Organization.status == "ACTIVE", Organization.deleted_at.is_(None)))
+    if not member:
+        raise HTTPException(403, "Studio access has been suspended or deactivated")

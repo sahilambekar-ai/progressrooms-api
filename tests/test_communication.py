@@ -292,6 +292,11 @@ async def test_studio_communication_testing_access(db_session, client, auth_head
     studio = User(email=f"tester_{uuid.uuid4().hex[:8]}@studio.test", full_name="Studio Tester",
                   role="STUDIO", is_active=True, is_verified=True)
     db_session.add(studio)
+    from app.models.organization import Organization, OrganizationMember
+    org = Organization(name="Communication Test Studio", slug=uuid.uuid4().hex)
+    db_session.add(org)
+    await db_session.flush()
+    db_session.add(OrganizationMember(organization_id=org.id, user_id=studio.id, role="STUDIO"))
     await db_session.commit()
     headers = auth_headers(studio)
     expected = 200 if dev_enabled else 403

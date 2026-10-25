@@ -22,7 +22,11 @@ from app.modules.billing.saas_router import router as saas_billing_router
 from app.modules.support.router import router as support_router
 from app.modules.communication.router import router as communication_router
 
+from app.modules.admin.health import lifespan, counts
+import time
+
 app = FastAPI(
+    lifespan=lifespan,
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
@@ -73,3 +77,17 @@ async def root():
         "message": "Welcome to Progress Rooms Multi-Tenant API",
         "docs": f"{settings.API_V1_STR}/docs"
     }
+
+
+@app.middleware("http")
+async def measure_api(request: Request, call_next):
+    started = time.monotonic()
+    code = 500
+    try:
+        response = await call_next(request)
+        code = response.status_code
+        return response
+    finally:
+        counts[0] += 1
+        counts[1] += int(code >= 500)
+        counts[2] += (time.monotonic()-started)*1000

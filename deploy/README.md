@@ -119,7 +119,7 @@ Dataset: two standalone teachers with 10 students each; Lotus Studio with an own
 5 teachers and 20 students; Rhythm Academy with an owner, 4 teachers and 15 students.
 Each teaching member has a private course, Monday/Wednesday/Friday timetable, 14 days of
 attendance history and 28 days of upcoming classes. Each studio's last two students have
-paused/expired enrollment scenarios. Seed users are verified for password login, never superadmins.
+paused/expired enrollment scenarios. Seed users are verified for password login. Optional explicit admin bootstrap is described below.
 Synthetic studios have complimentary, unmanaged Core/Studio access, not fabricated Razorpay payments.
 All recipients opt out of operational notifications; no phone numbers, real Zoom authorizations,
 payment accounts or public courses are created.
@@ -145,3 +145,58 @@ python -m app.validation_seed --credentials-only
 
 The document lists initial credentials. Passwords changed by testers are not reset by the seed.
 Never publish that document as a web asset, CI artifact, Git commit or log output.
+
+## One-time UAT account setup using the matching credential document
+
+Generating a credential document does **not** populate the database. Deploy the
+updated API through the normal user-controlled dev → uat promotion first. The
+new image must include `ensure_admin` in `app.validation_seed`. The deployment
+copies `setup-uat-validation.sh` to `/opt/progressrooms/uat`.
+
+1. Copy the existing private `private-validation/uat.env` from this checkout to
+   the VPS as `/opt/progressrooms/uat/validation-uat.env`, keeping it mode 0600.
+   This file includes the same seed secret used by yesterday's UAT credentials;
+   do not generate a replacement secret. Never use `prod.env` for this step.
+2. On the VPS run:
+
+   ```bash
+   bash /opt/progressrooms/uat/setup-uat-validation.sh /opt/progressrooms/uat/validation-uat.env
+   ```
+
+The helper accepts only `uat`, shares the deployment lock, validates the deployed
+image, saves a private backup of `api.env`, and installs only the seed settings
+and `APP_ENV=uat`. It seeds the current UAT database, preserving existing records
+and passwords, then recreates only the API service with those settings. It does
+not delete database volumes or alter production. If the database already has a
+super admin under another email, it stops: set `VALIDATION_ADMIN_EMAIL` in the
+private configuration to that existing address and rerun. A non-admin account
+can never be promoted by this bootstrap.
+
+The dataset contains 4 studios/standalone-teacher workspaces, 4 owners, 9 teachers
+and 55 students, with courses and attendance scenarios. All seeded account emails
+and passwords in the existing private document remain the same. They use normal
+password login and do not need the developer floating controls or OTP previews.
+The configured admin email defaults to `admin@test.progressrooms.local`; its
+initial password is included near the top of the private credential document.
+Bootstrap creates a missing admin or initializes a missing admin password; it
+never resets a password or reactivates a disabled account. When an existing admin
+has a different password, the server-generated document states that it was
+preserved instead of reporting a password that does not work.
+
+Retrieve the authoritative document **after setup** privately:
+
+```bash
+cd /opt/progressrooms/uat
+umask 077
+container=$(docker compose -p uat --env-file .env --env-file api-image.env \
+  -f compose.yaml -f compose.api.yaml ps -q api)
+docker cp "$container:/app/data/validation-credentials.md" ./uat-credentials.md
+chmod 600 ./uat-credentials.md
+```
+
+Download that file to your own machine rather than displaying it in logs or CI.
+`private-validation/uat-credentials.md` in this checkout lists the same initial
+credentials, including admin, but they apply only once bootstrap succeeds. The
+production private configuration/document remain separate; a production operator
+can explicitly configure the same seed module in their existing production API
+deployment. This UAT helper does not define or perform a production deployment.

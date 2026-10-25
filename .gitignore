@@ -42,3 +42,7 @@ generated-websites/
 
 # Private validation credentials and deployment seed secrets
 private-validation/
+
+# Local telemetry history
+*.sqlite3
+*.sqlite3-*
