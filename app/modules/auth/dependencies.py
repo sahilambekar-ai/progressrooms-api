@@ -44,13 +44,13 @@ async def get_current_user(
     if not user or user.deleted_at or user.account_status != "ACTIVE" or not user.is_verified:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
 
-    if user.role == "TEACHER":
-        from app.models.organization import OrganizationMember
-        active = await db.scalar(select(OrganizationMember.id).where(
+    if user.role in {"TEACHER", "STUDIO"}:
+        from app.models.organization import OrganizationMember, Organization
+        active = await db.scalar(select(OrganizationMember.id).join(Organization).where(
             OrganizationMember.user_id == user.id, OrganizationMember.is_active == True,
-            OrganizationMember.role == "TEACHER"))
+            OrganizationMember.role == user.role, Organization.status == "ACTIVE", Organization.deleted_at.is_(None)))
         if not active:
-            raise HTTPException(403, "Teacher access has been deactivated")
+            raise HTTPException(403, "Studio access has been suspended or deactivated")
     return user
 
 async def get_current_user_optional(

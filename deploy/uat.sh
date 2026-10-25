@@ -34,6 +34,8 @@ curl --fail --silent --show-error http://127.0.0.1:8100/health
 
 # Keep the previous tag/compose in backups; never modify Web's .env.
 cp "$bundle/compose.api.yaml" compose.api.yaml
+cp "$bundle/setup-uat-validation.sh" setup-uat-validation.sh
+chmod 700 setup-uat-validation.sh
 umask 077
 printf 'API_IMAGE_TAG=%s\n' "$release" > api-image.env.tmp
 mv api-image.env.tmp api-image.env

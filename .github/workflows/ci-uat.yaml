@@ -48,6 +48,7 @@ jobs:
       - name: Verify deployment script syntax
         run: |
           bash -n deploy/uat.sh
+          bash -n deploy/setup-uat-validation.sh
           sh -n deploy/start-api.sh
       - name: Build API image
         run: docker build --tag progressrooms-api-ci:${{ github.sha }} .
@@ -67,7 +68,7 @@ jobs:
           docker build --tag progressrooms-api-uat:${{ github.sha }} .
           mkdir bundle
           docker save progressrooms-api-uat:${{ github.sha }} | gzip > bundle/api-image.tar.gz
-          cp deploy/compose.api.yaml deploy/uat.sh bundle/
+          cp deploy/compose.api.yaml deploy/uat.sh deploy/setup-uat-validation.sh bundle/
       - name: Upload release to UAT
         uses: appleboy/scp-action@v1.0.0
         with:

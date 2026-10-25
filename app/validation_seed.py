@@ -10,7 +10,7 @@ from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo
 from sqlalchemy import select, text
 from app.core.database import AsyncSessionLocal
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash, verify_password
 from app.models.user import User
 from app.models.organization import Organization, OrganizationMember, OrganizationSetting, OrganizationStudent
 from app.models.plan import Plan, OrganizationSubscription
@@ -44,12 +44,17 @@ def accounts(profile):
                 yield slug, role, index, key, f'validation.{profile}.{key}@example.com'
 
 
-def credential_document(profile, secret):
+def credential_document(profile, secret, admin_email=None, admin_password_known=True):
     lines = [f'# Progress Rooms — {profile.upper()} validation credentials', '',
              'Private: do not commit or share publicly. These initial passwords are created when the seed runs.',
              'Use your deployment website /login. Accounts are pre-verified; no email/OTP delivery is required for password login.',
              'Existing accounts and passwords are never reset. A password changed in the application supersedes this document.',
              'These are synthetic validation accounts, with complimentary plan access and no payment transactions or Zoom authorization.', '']
+    if admin_email:
+        lines += ['## Platform super admin', '', f'Login: `{admin_email}`',
+                  f'Password: `{password(secret, profile, "platform.admin")}`' if admin_password_known else
+                  'Password: existing password preserved. It cannot be recovered from its hash; use the normal reset flow.',
+                  '', 'This initial credential applies only after bootstrap succeeds. Existing admin passwords are never overwritten.', '']
     for slug, name, teachers, students in TENANTS:
         lines += [f'## {name}', '', f'Studio slug: `validation-{profile}-{slug}`. {teachers} additional teachers; {students} students.', '']
         for role in ('owner', 'teacher', 'student'):
@@ -66,7 +71,7 @@ def credential_document(profile, secret):
               '- Students: enrolled courses, upcoming classes and mixed attendance history.',
               '- The final two students per studio start with expired and paused enrollments, respectively.',
               '- History includes attended, absent and excused marks; dates extend through the next 28 days on every seed run.',
-              '- Courses are private. No real payment, outbound notification, Zoom meeting, bank details or superadmin account is seeded.', '']
+              '- Courses are private. No real payment, outbound notification, Zoom meeting or bank details are seeded.', '']
     return '\n'.join(lines)
 
 
@@ -79,12 +84,41 @@ def write_private(path, content):
     path.chmod(0o600)
 
 
-async def seed(db, profile, secret, now=None):
+async def ensure_admin(db, profile, secret, email):
+    """Explicit bootstrap only: create admin or initialize its missing password, never reset one."""
+    import re
+    email = email.strip().lower()
+    if len(email) > 255 or not re.fullmatch(r"[^@\s|`]+@[^@\s|`]+\.[^@\s|`]+", email):
+        raise ValueError('Configure a valid VALIDATION_ADMIN_EMAIL')
+    existing = await db.scalar(select(User).where(User.role == 'SUPER_ADMIN'))
+    by_email = await db.scalar(select(User).where(User.email == email))
+    if existing and existing.email != email:
+        raise ValueError(f'A super admin already exists as {existing.email}; set VALIDATION_ADMIN_EMAIL to that address. It will not be replaced.')
+    if by_email and by_email.role != 'SUPER_ADMIN':
+        raise ValueError('Admin email belongs to a non-admin account; no privileges will be changed')
+    user = existing
+    if user and (user.deleted_at or not user.is_active or user.account_status in {'SUSPENDED', 'DISABLED'}):
+        raise ValueError('Existing admin is disabled; bootstrap will not reactivate it')
+    if user is None:
+        user = User(id=identity(profile, 'platform.admin'), email=email, full_name='Platform Super Admin',
+                    role='SUPER_ADMIN', is_superadmin=True, is_active=True, is_verified=True, account_status='ACTIVE')
+        db.add(user)
+    if not user.password_hash:
+        user.password_hash = get_password_hash(password(secret, profile, 'platform.admin'))
+        user.is_verified = True
+        user.account_status = 'ACTIVE'
+    await db.flush()
+    return verify_password(password(secret, profile, 'platform.admin'), user.password_hash)
+
+
+async def seed(db, profile, secret, now=None, admin_email=None):
     if profile not in {'uat', 'prod'} or len(secret) < 32:
         raise ValueError('Use profile uat/prod and a validation seed secret of at least 32 characters')
     now = now or datetime.now(timezone.utc)
     if db.bind.dialect.name == 'postgresql':
         await db.execute(text('SELECT pg_advisory_xact_lock(873125440)'))
+    if admin_email:
+        await ensure_admin(db, profile, secret, admin_email)
     async def add(model, key, **values):
         pk = identity(profile, key)
         row = await db.get(model, pk)
@@ -196,11 +230,16 @@ async def main():
     secret = os.environ.get('VALIDATION_SEED_SECRET', '')
     if profile not in {'uat', 'prod'} or len(secret) < 32:
         raise ValueError('Configure VALIDATION_SEED_PROFILE=uat/prod and VALIDATION_SEED_SECRET (32+ characters)')
+    admin_email = os.environ.get('VALIDATION_ADMIN_EMAIL', 'admin@test.progressrooms.local') if os.environ.get('VALIDATION_ADMIN_ENABLED', 'false').lower() == 'true' else None
+    admin_password_known = True
     if not args.credentials_only:
         async with AsyncSessionLocal() as db:
-            counts = await seed(db, profile, secret)
+            counts = await seed(db, profile, secret, admin_email=admin_email)
+            if admin_email:
+                user = await db.scalar(select(User).where(User.role == 'SUPER_ADMIN'))
+                admin_password_known = verify_password(password(secret, profile, 'platform.admin'), user.password_hash)
         print(f'Validation seed complete ({profile}): {counts}; passwords are not logged.')
-    write_private(os.environ.get('VALIDATION_CREDENTIALS_PATH', 'data/validation-credentials.md'), credential_document(profile, secret))
+    write_private(os.environ.get('VALIDATION_CREDENTIALS_PATH', 'data/validation-credentials.md'), credential_document(profile, secret, admin_email, admin_password_known))
 
 
 if __name__ == '__main__':
