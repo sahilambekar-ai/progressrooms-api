@@ -172,10 +172,10 @@ async def test_session_update_syncs_future_occurrences(db_session):
     assert occ.instructor_id == m_teacher2.id
 
 @pytest.mark.asyncio
-async def test_student_join_window_and_eligibility(client: AsyncClient, db_session, auth_headers):
+async def test_student_meeting_links_without_time_window(client: AsyncClient, db_session, auth_headers):
     """
     AUD-P0-2 & AUD-P1-2: Server computes can_join and eligibility_reason.
-    Join window: opens 15 minutes before class start until end time.
+    Meeting actions remain available before the class without a time window.
     """
     org = Organization(name="Eligibility Studio", slug=f"el-{uuid.uuid4().hex[:6]}", timezone="Asia/Kolkata")
     db_session.add(org)
@@ -259,8 +259,8 @@ async def test_student_join_window_and_eligibility(client: AsyncClient, db_sessi
 
     far_item = next((c for c in classes if c["id"] == str(occ_far.id)), None)
     assert far_item is not None
-    assert far_item["can_join"] is False
-    assert "15 minutes before class" in far_item["eligibility_reason"]
+    assert far_item["can_join"] is True
+    assert far_item["eligibility_reason"] == "Ready to join"
 
     ready_item = next((c for c in classes if c["id"] == str(occ_ready.id)), None)
     assert ready_item is not None
@@ -272,10 +272,10 @@ async def test_student_join_window_and_eligibility(client: AsyncClient, db_sessi
     assert meet_resp.status_code == 200
     assert meet_resp.json()["meeting_url"] == "https://zoom.us/j/444555666"
 
-    # Attempt fetch meeting URL for far class -> rejected 403
+    # Future classes are accessible before the former 15-minute window.
     far_resp = await client.get(f"student/classes/{occ_far.id}/meeting-url", headers=h)
-    assert far_resp.status_code == 403
-    assert "15 minutes" in far_resp.json()["detail"]
+    assert far_resp.status_code == 200
+    assert far_resp.json()["meeting_url"] == "https://zoom.us/j/111222333"
 
 @pytest.mark.asyncio
 async def test_support_ticket_conversation_flow(client: AsyncClient, db_session, auth_headers):

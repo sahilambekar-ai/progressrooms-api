@@ -287,6 +287,8 @@ async def auth_context(
         "member_id": str(selected[0].id) if selected else None,
         "organization_id": str(selected[1].id) if selected else None,
         "organization_name": selected[1].name if selected else None,
+        "timezone": selected[1].timezone if selected else None,
+        "can_teach": selected[0].can_teach if selected else False,
         "organization_slug": selected[1].slug if selected else None,
         "teacher_code": selected[0].teacher_code if selected and current_user.role == "TEACHER" else None,
         "organizations": [

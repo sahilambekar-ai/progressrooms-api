@@ -174,7 +174,7 @@ async def create_join_link(org_id: uuid.UUID, occurrence_id: uuid.UUID,
                            tenant=Depends(require_org_role([UserRole.STUDIO, UserRole.TEACHER])),
                            db: AsyncSession = Depends(get_db)):
     occ = await accessible_occurrence(db, org_id, occurrence_id, tenant[1], lock=False)
-    if occ.status in {"CANCELLED", "COMPLETED"}:
+    if occ.status == "CANCELLED":
         raise HTTPException(409, "This class is no longer joinable")
 
     try:
@@ -213,7 +213,16 @@ async def teacher_agenda(org_id: uuid.UUID, tenant=Depends(require_org_role([Use
     from app.common.dates import ensure_utc
     today = [o for o in rows if ensure_utc(o.actual_start_at).astimezone(ZoneInfo(org.timezone)).date() == local_today]
     selected = today or rows
+    from app.modules.zoom.meetings import host_for_occurrence
+    can_start = {}
+    for occurrence in selected:
+        try:
+            connection = await host_for_occurrence(db, occurrence)
+            host_member = await db.get(OrganizationMember, connection.member_id)
+            can_start[occurrence.id] = bool(member and host_member and host_member.user_id == member.user_id)
+        except HTTPException:
+            can_start[occurrence.id] = False
     return {"day": "today" if today else "tomorrow", "timezone": org.timezone, "classes": [dict(
         id=str(o.id), name=o.session.name, description=o.session.full_description, start_at=o.actual_start_at.isoformat(), end_at=o.actual_end_at.isoformat(),
-        status=o.status, meeting_url=o.meeting_url, host_email=o.zoom_host_email, zoom_status=o.zoom_provisioning_status,
+        status=o.status, can_start=can_start.get(o.id, False), meeting_url=o.meeting_url, host_email=o.zoom_host_email, zoom_status=o.zoom_provisioning_status,
         is_current=ensure_utc(o.actual_start_at) <= now < ensure_utc(o.actual_end_at)) for o in selected]}

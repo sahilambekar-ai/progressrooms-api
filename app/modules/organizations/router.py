@@ -284,6 +284,7 @@ async def get_studio_profile(
 
     return {
         "organization_id": str(org.id),
+        "timezone": org.timezone,
         "name": org.name,
         "slug": org.slug,
         "phone": settings.phone or settings.support_phone,

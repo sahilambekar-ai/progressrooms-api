@@ -49,6 +49,10 @@ async def test_teacher_calendar_persistence_permissions_and_local_dates(db_sessi
             assert response.json()[0]['date']=='2026-10-15'
             assert response.json()[0]['status']=='PRESENT'
             assert response.json()[0]['teacherName']=='Teacher'
+            assert response.json()[0]['endAt']
+            assert response.json()[0]['meetingAvailable'] is True
+            context = await client.get('/auth/context', headers=headers(teacher))
+            assert context.json()['timezone'] == 'Asia/Kolkata'
             target=f'{url}/occurrences/{occurrence.id}'
             assert (await client.put(target,json={'status':'PRESENT'},headers=headers(teacher))).status_code==403
             for value in ['PRESENT','ABSENT','EXCUSED']:
@@ -73,5 +77,14 @@ async def test_teacher_calendar_persistence_permissions_and_local_dates(db_sessi
             assert self_res[0]['status']=='PRESENT'
             assert self_res[0]['studentName']=='Student'
             assert (await client.get(url+'?month=2026-11',headers=headers(owner))).json()==[]
+            # October local time falls in November UTC and must stay in October's calendar.
+            org.timezone = 'America/Los_Angeles'
+            occurrence.actual_start_at = datetime(2026,11,1,6,30,tzinfo=timezone.utc)
+            occurrence.actual_end_at = occurrence.actual_start_at + timedelta(hours=1)
+            await db_session.commit()
+            local_month = await client.get(student_self_url, headers=headers(student))
+            assert local_month.json()[0]['date'] == '2026-10-31'
+            assert local_month.json()[0]['meetingAvailable'] is True
+            assert (await client.get('/student/attendance?month=2026-11', headers=headers(student))).json() == []
     finally:
         api_v1.dependency_overrides.clear()

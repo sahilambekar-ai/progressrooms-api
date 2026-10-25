@@ -53,10 +53,10 @@ async def meeting_access(db, occurrence, org, *, is_host=False, actor_user_id=No
     await lock_studio(db, org.id)
     occ = await db.scalar(select(ClassOccurrence).where(ClassOccurrence.id == occurrence.id, ClassOccurrence.organization_id == org.id)
         .with_for_update().execution_options(populate_existing=True))
-    if not occ or occ.status in {"CANCELLED", "COMPLETED"}:
+    if not occ or occ.status == "CANCELLED":
         raise HTTPException(409, "This class is no longer joinable")
     session = await db.get(Session, occ.session_id)
-    if not session or not session.is_active or session.deleted_at:
+    if not session or ((not session.is_active or session.deleted_at) and occ.status != "COMPLETED"):
         raise HTTPException(409, "This class is inactive")
     # Explicit, externally managed class links remain participant links, never Zoom host credentials.
     if occ.meeting_url and not occ.meeting_provider and not occ.zoom_connection_id:
@@ -83,7 +83,7 @@ async def meeting_access(db, occurrence, org, *, is_host=False, actor_user_id=No
         await lock_studio(db, org.id)
         # Recheck after the commit: cancellation/disconnect cannot race a queued operation.
         occ = await db.scalar(select(ClassOccurrence).where(ClassOccurrence.id == occurrence.id).with_for_update().execution_options(populate_existing=True))
-        if occ.status in {"CANCELLED", "COMPLETED"}:
+        if occ.status == "CANCELLED":
             raise HTTPException(409, "This class is no longer joinable")
         conn = await host_for_occurrence(db, occ)
         token = await access_token(db, conn)

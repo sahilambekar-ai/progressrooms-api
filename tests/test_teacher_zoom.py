@@ -472,3 +472,46 @@ async def test_connect_accepts_host_id_without_email_validation(db_session, stud
             assert (await client.post(path, params={"zoom_host_id": "email@example.com"}, headers=headers)).status_code == 422
     finally:
         api_v1.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('days,status', [(30, 'SCHEDULED'), (-2, 'SCHEDULED'), (-2, 'COMPLETED')])
+async def test_owner_and_student_access_without_time_window(db_session, studio, monkeypatch, days, status):
+    from app.models.commerce import SessionEnrollment
+    from app.modules.student.router import get_class_meeting_url
+    from app.modules.scheduling.router import create_join_link
+    org, owner, teacher, om, tm = studio
+    await authorize(db_session, org, om, owner)
+    await enable(db_session, org, om)
+    occ = await occurrence(db_session, org, om)
+    start = svc.now() + timedelta(days=days)
+    occ.actual_start_at, occ.actual_end_at = start, start + timedelta(minutes=45)
+    occ.status = status
+    if status == 'COMPLETED':
+        session = await db_session.get(Session, occ.session_id)
+        session.is_active, session.deleted_at = False, svc.now()
+    student = User(email=f'{uuid.uuid4()}@example.com', full_name='Student', role='STUDENT', account_status='ACTIVE')
+    db_session.add(student)
+    await db_session.flush()
+    historical = days < 0
+    enrollment = SessionEnrollment(organization_id=org.id, session_id=occ.session_id, user_id=student.id,
+        status='EXPIRED' if historical else 'ACTIVE', valid_from=svc.now()-timedelta(days=10),
+        valid_until=svc.now()+timedelta(days=-1 if historical else 60), total_sessions=1,
+        sessions_attended=1 if historical else 0)
+    db_session.add(enrollment)
+    await db_session.commit()
+    own = await create_join_link(org.id, occ.id, (org, om), db_session)
+    assert own['can_start'] and own['meeting_url'] == own['host_url']
+    assert own['host_url'] != own['join_url']
+    monkeypatch.setattr(ZoomProvider, 'meeting', AsyncMock(side_effect=AssertionError('Student cannot retrieve host credentials')))
+    result = await get_class_meeting_url(occ.id, student, db_session)
+    assert result['meeting_url'] == own['join_url']
+    assert enrollment.sessions_attended == (1 if historical else 0)
+    stranger = User(id=uuid.uuid4(), email='stranger@example.com', role='STUDENT')
+    with pytest.raises(HTTPException) as denied:
+        await get_class_meeting_url(occ.id, stranger, db_session)
+    assert denied.value.status_code == 403
+    occ.status = 'CANCELLED'
+    await db_session.commit()
+    with pytest.raises(HTTPException):
+        await create_join_link(org.id, occ.id, (org, om), db_session)

@@ -92,7 +92,9 @@ async def teacher_state(db, member):
     status = conn.status if conn else "NOT_CONNECTED"
     if attempt and status not in USABLE:
         status = "PENDING"
-    return {"zoom_connection_status": status, "zoom_connection": summary(conn),
+    host_member = await db.get(OrganizationMember, host.member_id) if host else None
+    return {"zoom_connection_status": status,
+            "fallback_host_is_owner": bool(host_member and host_member.role == "STUDIO" and host.member_id != member.id), "zoom_connection": summary(conn),
             "zoom_verified_email": conn.email if conn and conn.status in USABLE else None,
             "is_default_zoom_host": prefs.default_zoom_host_member_id == member.id,
             "effective_zoom_host": summary(host), "zoom_ready": host is not None,

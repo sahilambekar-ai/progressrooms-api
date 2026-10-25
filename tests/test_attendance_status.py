@@ -38,7 +38,7 @@ def test_start_time_is_compared_as_an_instant_across_timezones():
 
 def test_calendar_returns_start_instant_for_client_status_transition():
     start = datetime.now(timezone.utc) + timedelta(minutes=5)
-    occurrence = SimpleNamespace(id="class", actual_start_at=start, status="SCHEDULED")
+    occurrence = SimpleNamespace(id="class", actual_start_at=start, actual_end_at=start + timedelta(hours=1), status="SCHEDULED")
     event = event_dict(occurrence, SimpleNamespace(name="Yoga", full_description="Guided yoga practice"), None, None, ZoneInfo("Asia/Kolkata"))
     assert event["description"] == "Guided yoga practice"
     assert event["status"] == "SCHEDULED"
