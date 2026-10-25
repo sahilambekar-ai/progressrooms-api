@@ -32,7 +32,8 @@ async def test_admin_metrics_matches_independent_aggregates(db_session):
     assert len(statements) == 1
     assert [result[key] for key in ('total_organizations', 'total_instructors', 'total_students',
                                    'total_users', 'total_platform_revenue', 'active_subscriptions')] == expected
-    assert result['status'] == 'healthy'
+    # Aggregate counts alone do not establish measured server health.
+    assert result['status'] == 'unknown'
 
 
 @pytest.mark.asyncio

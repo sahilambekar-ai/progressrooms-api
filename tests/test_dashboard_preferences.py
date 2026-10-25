@@ -16,6 +16,7 @@ async def test_dashboard_font_default_validation_and_user_isolation(db_session):
     org = Organization(name="Font Test Studio", slug=uuid.uuid4().hex)
     db_session.add(org)
     await db_session.flush()
+    db_session.add(OrganizationMember(organization_id=org.id, user_id=users[0].id, role="STUDIO"))
     db_session.add(OrganizationMember(organization_id=org.id, user_id=users[1].id, role="TEACHER", can_teach=True))
     await db_session.commit()
     async def override():

@@ -37,7 +37,18 @@ async def test_engine():
 
 @pytest_asyncio.fixture
 async def db_session(test_engine):
-    session_factory = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
-    async with session_factory() as session:
-        yield session
-        await session.rollback()
+    # Application commits must stay inside this test's outer transaction.
+    async with test_engine.connect() as connection:
+        transaction = await connection.begin()
+        # SQLite otherwise delays BEGIN until a write, allowing a released
+        # SAVEPOINT to commit outside the outer transaction.
+        await connection.exec_driver_sql("BEGIN")
+        session_factory = async_sessionmaker(
+            connection, expire_on_commit=False, class_=AsyncSession,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            async with session_factory() as session:
+                yield session
+        finally:
+            await transaction.rollback()
