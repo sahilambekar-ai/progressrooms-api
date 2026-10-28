@@ -1,32 +1,40 @@
 import uuid
 from datetime import datetime, timezone
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
+from app.common.validation import Name
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, and_, or_, desc
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models.organization import Organization, OrganizationMember
+from app.models.organization import Organization, OrganizationMember, OrganizationStudent
+from app.models.commerce import SessionEnrollment
 from app.models.user import User
 from app.models.support import SupportTicket, SupportMessage
 from app.modules.organizations.dependencies import require_org_role
 from app.modules.auth.dependencies import get_current_user
 from app.common.enums import UserRole
 
+async def support_student(user: User = Depends(get_current_user)) -> User:
+    if user.role != "STUDENT":
+        raise HTTPException(403, "Student account required")
+    return user
+
 router = APIRouter(tags=["Support"])
 
 class CreateTicketPayload(BaseModel):
     organization_id: uuid.UUID
-    subject: str
-    category: str = "GENERAL"
-    initial_message: str
+    subject: Name
+    category: Literal["GENERAL", "MEMBERSHIP", "CLASS_ACCESS", "ATTENDANCE"] = "GENERAL"
+    initial_message: str = Field(min_length=1, max_length=10000)
 
 class SendMessagePayload(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=10000)
 
 class UpdateTicketStatusPayload(BaseModel):
-    status: str
+    status: Literal["OPEN", "IN_PROGRESS", "RESOLVED"]
 
 # -----------------
 # Organization Endpoints
@@ -190,17 +198,14 @@ async def update_org_ticket_status(
 # -----------------
 @router.get("/student/support-tickets")
 async def list_student_tickets(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(support_student),
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(SupportTicket).options(
         selectinload(SupportTicket.messages),
         selectinload(SupportTicket.organization)
     ).where(
-        or_(
-            SupportTicket.student_id == current_user.id,
-            SupportTicket.student_email == current_user.email
-        )
+        SupportTicket.student_id == current_user.id
     ).order_by(desc(SupportTicket.updated_at))
 
     tickets = (await db.execute(stmt)).scalars().all()
@@ -225,12 +230,19 @@ async def list_student_tickets(
 @router.post("/student/support-tickets", status_code=status.HTTP_201_CREATED)
 async def create_student_ticket(
     payload: CreateTicketPayload,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(support_student),
     db: AsyncSession = Depends(get_db)
 ):
-    org = await db.scalar(select(Organization).where(Organization.id == payload.organization_id))
+    org = await db.scalar(select(Organization).where(Organization.id == payload.organization_id, Organization.status == "ACTIVE", Organization.deleted_at.is_(None)))
     if not org:
         raise HTTPException(404, "Studio organization not found")
+
+    related = await db.scalar(select(OrganizationStudent.id).where(
+        OrganizationStudent.organization_id == org.id, OrganizationStudent.user_id == current_user.id))
+    enrolled = await db.scalar(select(SessionEnrollment.id).where(
+        SessionEnrollment.organization_id == org.id, SessionEnrollment.user_id == current_user.id).limit(1))
+    if not related and not enrolled:
+        raise HTTPException(403, "Choose a studio you are connected to")
 
     if not payload.subject.strip() or not payload.initial_message.strip():
         raise HTTPException(422, "Subject and message are required")
@@ -271,7 +283,7 @@ async def create_student_ticket(
 @router.get("/student/support-tickets/{ticket_id}")
 async def get_student_ticket_detail(
     ticket_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(support_student),
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(SupportTicket).options(
@@ -279,10 +291,7 @@ async def get_student_ticket_detail(
         selectinload(SupportTicket.organization)
     ).where(
         SupportTicket.id == ticket_id,
-        or_(
-            SupportTicket.student_id == current_user.id,
-            SupportTicket.student_email == current_user.email
-        )
+        SupportTicket.student_id == current_user.id
     )
     ticket = (await db.execute(stmt)).scalar_one_or_none()
     if not ticket:
@@ -314,15 +323,12 @@ async def get_student_ticket_detail(
 async def send_student_ticket_message(
     ticket_id: uuid.UUID,
     payload: SendMessagePayload,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(support_student),
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(SupportTicket).where(
         SupportTicket.id == ticket_id,
-        or_(
-            SupportTicket.student_id == current_user.id,
-            SupportTicket.student_email == current_user.email
-        )
+        SupportTicket.student_id == current_user.id
     )
     ticket = (await db.execute(stmt)).scalar_one_or_none()
     if not ticket:

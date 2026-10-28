@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
@@ -22,16 +22,16 @@ from app.modules.billing.saas_router import router as saas_billing_router
 from app.modules.support.router import router as support_router
 from app.modules.communication.router import router as communication_router
 
-from app.modules.admin.health import lifespan, counts
-import time
+from app.modules.admin.health import lifespan
+from app.core.database import get_db
 
 app = FastAPI(
     lifespan=lifespan,
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    docs_url=f"{settings.API_V1_STR}/docs",
-    redoc_url=f"{settings.API_V1_STR}/redoc",
+    openapi_url=f"{settings.API_V1_STR}/openapi.json" if settings.is_local_environment else None,
+    docs_url=f"{settings.API_V1_STR}/docs" if settings.is_local_environment else None,
+    redoc_url=f"{settings.API_V1_STR}/redoc" if settings.is_local_environment else None,
 )
 
 # CORS Middleware
@@ -44,7 +44,7 @@ app.add_middleware(
 )
 
 # Include Routers under API_V1_STR
-api_v1 = FastAPI()
+api_v1 = FastAPI(openapi_url="/openapi.json" if settings.is_local_environment else None, docs_url="/docs" if settings.is_local_environment else None, redoc_url="/redoc" if settings.is_local_environment else None)
 api_v1.include_router(zoom_router)
 api_v1.include_router(auth_router)
 api_v1.include_router(org_router)
@@ -75,19 +75,20 @@ async def health_check():
 async def root():
     return {
         "message": "Welcome to Progress Rooms Multi-Tenant API",
-        "docs": f"{settings.API_V1_STR}/docs"
+        "docs": f"{settings.API_V1_STR}/docs" if settings.is_local_environment else None
     }
 
 
-@app.middleware("http")
-async def measure_api(request: Request, call_next):
-    started = time.monotonic()
-    code = 500
+from app.core.observability import request_metrics, unhandled_error
+app.middleware("http")(request_metrics)
+app.add_exception_handler(Exception, unhandled_error)
+
+@app.get("/ready", tags=["Health"], include_in_schema=False)
+async def ready(db=Depends(get_db)):
+    import asyncio
+    from sqlalchemy import text
     try:
-        response = await call_next(request)
-        code = response.status_code
-        return response
-    finally:
-        counts[0] += 1
-        counts[1] += int(code >= 500)
-        counts[2] += (time.monotonic()-started)*1000
+        await asyncio.wait_for(db.execute(text("SELECT 1")), timeout=2)
+    except Exception:
+        return JSONResponse({"status":"unavailable"},status_code=503)
+    return {"status":"ready"}

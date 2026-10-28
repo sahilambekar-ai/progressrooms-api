@@ -16,7 +16,7 @@ from app.core.config import settings
 
 def mock_payments():
     # Mock checkout is deliberately opt-in and cannot be enabled by a request.
-    return settings.DEV_TEST_LOGIN_ENABLED and settings.RAZORPAY_KEY_SECRET.startswith('rzp_secret_mock')
+    return settings.development_login_enabled and settings.RAZORPAY_KEY_SECRET.startswith('rzp_secret_mock')
 
 
 class CommerceService:

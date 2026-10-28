@@ -55,7 +55,8 @@ def summary(conn):
         return None
     return {"connection_id": str(conn.id), "member_id": str(conn.member_id), "zoom_host_id": conn.zoom_user_id, "email": conn.email,
             "display_name": conn.display_name, "status": conn.status, "is_simulated": conn.mode == "mock", "version": conn.version,
-            "production_ready": conn.status == "ACTIVE" and conn.mode == "live"}
+            "production_ready": conn.status == "ACTIVE" and conn.mode == "live",
+            "zoom_mail_authorized": bool(set((conn.scopes or "").split()).intersection({"email:write:send_msg", "email:write:send_msg:admin", "mail:write", "mail:write:admin"}))}
 
 
 async def resolve_host(db, org_id, member_id=None, explicit_member_id=None):
@@ -92,7 +93,9 @@ async def teacher_state(db, member):
     status = conn.status if conn else "NOT_CONNECTED"
     if attempt and status not in USABLE:
         status = "PENDING"
-    return {"zoom_connection_status": status, "zoom_connection": summary(conn),
+    host_member = await db.get(OrganizationMember, host.member_id) if host else None
+    return {"zoom_connection_status": status,
+            "fallback_host_is_owner": bool(host_member and host_member.role == "STUDIO" and host.member_id != member.id), "zoom_connection": summary(conn),
             "zoom_verified_email": conn.email if conn and conn.status in USABLE else None,
             "is_default_zoom_host": prefs.default_zoom_host_member_id == member.id,
             "effective_zoom_host": summary(host), "zoom_ready": host is not None,

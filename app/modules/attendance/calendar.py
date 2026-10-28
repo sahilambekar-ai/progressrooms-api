@@ -39,7 +39,10 @@ def event_dict(occ, session, status, notes, zone, **extra):
     local = local.astimezone(zone)
     final_status = calendar_status(occ.actual_start_at, occ.status, status)
     return dict(id=str(occ.id), occurrenceId=str(occ.id), date=local.date().isoformat(),
-                time=local.strftime("%I:%M %p"), startAt=local.isoformat(), sessionTitle=session.name, description=session.full_description,
+                time=local.strftime("%I:%M %p"), startAt=local.isoformat(),
+                endAt=(occ.actual_end_at.replace(tzinfo=timezone.utc) if occ.actual_end_at.tzinfo is None else occ.actual_end_at).isoformat(),
+                meetingAvailable=occ.status != "CANCELLED",
+                meetingUrl=occ.meeting_url if occ.status != "CANCELLED" else None, sessionTitle=session.name, description=session.full_description,
                 status=final_status,
                 remarks=notes or "", **extra)
 

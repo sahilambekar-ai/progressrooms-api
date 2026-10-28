@@ -1,17 +1,19 @@
+from app.common.passwords import Password
+from app.common.validation import Name
 from app.common.phone import PhoneNumber
 from pydantic import BaseModel, EmailStr, Field, StrictBool, field_validator, model_validator
 from typing import Literal
 import uuid
 
 class RegisterRequest(BaseModel):
-    full_name: str = Field(min_length=1, max_length=255)
+    full_name: Name
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    password: Password
     phone: PhoneNumber | None = None
     whatsapp_number: PhoneNumber | None = None
     role: Literal["STUDIO", "STUDENT"] = "STUDIO"
     location: str | None = Field(default=None, max_length=255)
-    studio_name: str | None = None
+    studio_name: Name | None = None
     selected_plan: Literal["starter", "core", "studio"] = "starter"
     billing_country: str | None = Field(default=None, pattern=r"^[A-Z]{2}$")
     privacy_accepted: StrictBool
@@ -38,8 +40,8 @@ class RegisterResponse(BaseModel):
     otp_preview: str | None = None
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=128)
 
 class DevLoginRequest(BaseModel):
     role: str
@@ -54,7 +56,7 @@ class LoginResponse(BaseModel):
     otp_preview: str | None = None
 
 class RequestOTPRequest(BaseModel):
-    email: str
+    email: str = Field(min_length=1, max_length=255)
     purpose: str = "LOGIN_VERIFICATION"
 
 class RequestOTPResponse(BaseModel):
@@ -65,7 +67,7 @@ class RequestOTPResponse(BaseModel):
     requires_activation: bool = False
 
 class VerifyOTPRequest(BaseModel):
-    email: str
+    email: str = Field(min_length=1, max_length=255)
     otp: str | None = None
     otp_code: str | None = None
     purpose: str = "LOGIN_VERIFICATION"
@@ -82,7 +84,7 @@ class TokenResponse(BaseModel):
 
 class UserResponse(BaseModel):
     id: uuid.UUID
-    email: str
+    email: str = Field(min_length=1, max_length=255)
     full_name: str
     is_superadmin: bool
     role: str

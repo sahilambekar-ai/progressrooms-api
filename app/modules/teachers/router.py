@@ -1,3 +1,5 @@
+from app.core.password_work import hash_password, run
+from app.common.profile_consent import attest_profile_change
 import math
 import secrets
 import uuid
@@ -7,7 +9,9 @@ from pydantic import BaseModel, Field, EmailStr
 from sqlalchemy import select, or_, update, func, asc, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
-from app.core.security import get_password_hash
+from app.common.email_content import email_subject
+from app.common.validation import Name
+from app.modules.auth.sessions import revoke_sessions
 from app.modules.teachers.credentials import reconfirm, seal, reveal
 from app.modules.teachers.codes import generate_teacher_code
 from app.modules.teachers.service import protect_teaching_roster
@@ -21,7 +25,7 @@ router = APIRouter(prefix="/teachers", tags=["Studio Teachers Management"])
 
 class TeacherCreateRequest(BaseModel):
     billing_country: str | None = Field(None, pattern=r"^[A-Z]{2}$")
-    name: str = Field(min_length=1, max_length=255)
+    name: Name
     email: EmailStr
     username: str | None = Field(None, min_length=3, max_length=100, pattern=r"^[a-zA-Z0-9_.-]+$")
     password: str | None = Field(None, min_length=8, max_length=128)
@@ -33,9 +37,11 @@ class TeacherCreateRequest(BaseModel):
     studio_id: uuid.UUID | None = None
 
 class TeacherUpdateRequest(BaseModel):
+    profile_consent_confirmed: bool = False
+    profile_consent_reference: str | None = Field(None, min_length=1, max_length=255)
     billing_country: str | None = Field(None, pattern=r"^[A-Z]{2}$")
     studio_password: str = Field(default="", max_length=128)
-    name: str | None = Field(None, min_length=1, max_length=255)
+    name: Name | None = None
     email: EmailStr | None = None
     username: str | None = Field(None, min_length=3, max_length=100, pattern=r"^[a-zA-Z0-9_.-]+$")
     password: str | None = Field(None, min_length=8, max_length=128)
@@ -142,24 +148,22 @@ async def public_teacher_lookup(query: str = Query(..., min_length=1), db: Async
             .order_by(Session.name.asc())
         )).scalars().all()
 
+        ids = [course.id for course in instruct_sessions]
+        enrollment_counts = dict((await db.execute(select(SessionEnrollment.session_id, func.count(SessionEnrollment.id)).where(
+            SessionEnrollment.organization_id == org.id, SessionEnrollment.session_id.in_(ids),
+            SessionEnrollment.status == "ACTIVE").group_by(SessionEnrollment.session_id))).all()) if ids else {}
+        ranked = select(ClassOccurrence.id.label("id"), func.row_number().over(
+            partition_by=ClassOccurrence.session_id,
+            order_by=(ClassOccurrence.actual_start_at.asc(), ClassOccurrence.id.asc())).label("position")).where(
+                ClassOccurrence.organization_id == org.id, ClassOccurrence.session_id.in_(ids),
+                ClassOccurrence.status == "SCHEDULED", ClassOccurrence.actual_start_at >= now_utc).subquery()
+        next_occurrences = {row.session_id: row for row in (await db.scalars(select(ClassOccurrence).join(
+            ranked, ranked.c.id == ClassOccurrence.id).where(ranked.c.position == 1))).all()} if ids else {}
         sessions_list = []
         for s in instruct_sessions:
-            enrolled_count = await db.scalar(
-                select(func.count(SessionEnrollment.id)).where(
-                    SessionEnrollment.session_id == s.id,
-                    SessionEnrollment.status == "ACTIVE"
-                )
-            ) or 0
+            enrolled_count = enrollment_counts.get(s.id, 0)
             remaining_spots = max(0, s.capacity - enrolled_count) if s.capacity is not None else None
-
-            # Next session occurrence
-            next_occ = await db.scalar(
-                select(ClassOccurrence).where(
-                    ClassOccurrence.session_id == s.id,
-                    ClassOccurrence.status == "SCHEDULED",
-                    ClassOccurrence.actual_start_at >= now_utc
-                ).order_by(ClassOccurrence.actual_start_at.asc()).limit(1)
-            )
+            next_occ = next_occurrences.get(s.id)
 
             sessions_list.append({
                 "id": str(s.id),
@@ -294,7 +298,7 @@ async def create_studio_teacher(payload: TeacherCreateRequest, current_user: Use
     if await db.scalar(select(User.id).where(or_(User.email == email, User.username == username))):
         raise HTTPException(409, "Email or username is already in use")
     user = User(email=email, username=username, full_name=payload.name.strip(), role="TEACHER",
-                password_hash=get_password_hash(password), managed_password_enc=seal(password), phone=phone,
+                password_hash=await hash_password(password), managed_password_enc=seal(password), phone=phone,
                 address=address, location=location, billing_country=payload.billing_country, is_verified=True, account_status="ACTIVE")
     db.add(user)
     await db.flush()
@@ -318,19 +322,24 @@ async def owned_teacher(db, user, member_id):
 async def update_studio_teacher(member_id: uuid.UUID, payload: TeacherUpdateRequest,
                                 current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     member, user, org = await owned_teacher(db, current_user, member_id)
-    reconfirm(current_user, payload.studio_password)
-    values = payload.model_dump(exclude_unset=True, exclude_none=True, exclude={"studio_password"})
+    await reconfirm(current_user, payload.studio_password)
+    values = payload.model_dump(exclude_unset=True, exclude_none=True, exclude={"studio_password", "profile_consent_confirmed", "profile_consent_reference"})
     for key in ("email", "username"):
         if key in values:
             values[key] = values[key].lower()
             if await db.scalar(select(User.id).where(getattr(User, key) == values[key], User.id != user.id)):
                 raise HTTPException(409, f"{key.title()} is already in use")
+    changed = [key for key in ("name", "email", "username", "phone", "address", "location", "billing_country")
+               if key in values and (getattr(user, "full_name" if key == "name" else key) or None) != (values[key] or None)]
+    attest_profile_change(db, actor=current_user, subject=user, organization_id=org.id,
+        changed_fields=changed, confirmed=payload.profile_consent_confirmed, reference=payload.profile_consent_reference)
     if values.get("is_active") is False:
         await protect_teaching_roster(db, member)
     deactivate_assigned_classes = values.get("is_active") is False and member.is_active
     for key, value in values.items():
         if key == "password":
-            user.password_hash = get_password_hash(value)
+            user.password_hash = await hash_password(value)
+            await revoke_sessions(db, user)
             user.managed_password_enc = seal(value)
         elif key == "name":
             user.full_name = value.strip()
@@ -388,8 +397,8 @@ async def teacher_password(member_id: uuid.UUID, payload: CredentialRequest,
                            current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     from fastapi.responses import JSONResponse
     _, user, _ = await owned_teacher(db, current_user, member_id)
-    reconfirm(current_user, payload.studio_password)
-    return JSONResponse({"password": reveal(user)}, headers={"Cache-Control": "no-store"})
+    await reconfirm(current_user, payload.studio_password)
+    return JSONResponse({"password": await run(reveal, user)}, headers={"Cache-Control": "no-store"})
 
 @router.post("/{member_id}/invitation")
 async def invite_teacher(member_id: uuid.UUID, payload: CredentialRequest,
@@ -401,11 +410,11 @@ async def invite_teacher(member_id: uuid.UUID, payload: CredentialRequest,
     from app.core.config import settings
     from app.core.email_service import BREVO_API_URL
     member, user, org = await owned_teacher(db, current_user, member_id)
-    reconfirm(current_user, payload.studio_password)
+    await reconfirm(current_user, payload.studio_password)
     # Lock across dispatch so repeated clicks cannot send duplicate invitations.
     user = await db.scalar(select(User).where(User.id == user.id).with_for_update())
     details = serialize(member, user, org)
-    details["password"] = reveal(user)
+    details["password"] = await run(reveal, user)
     fingerprint = hashlib.sha256(json.dumps(details, sort_keys=True).encode()).hexdigest()
     if user.teacher_invitation_fingerprint == fingerprint:
         return {"message": "Invitation already sent; no teacher details have changed"}
@@ -419,7 +428,7 @@ async def invite_teacher(member_id: uuid.UUID, payload: CredentialRequest,
             response = await client.post(BREVO_API_URL, headers={"api-key": settings.BREVO_API_KEY}, json={
                 "sender": {"name": settings.BREVO_SENDER_NAME, "email": settings.BREVO_SENDER_EMAIL},
                 "to": [{"email": user.email, "name": user.full_name}],
-                "subject": f"Your teacher account at {org.name}", "htmlContent": content})
+                "subject": email_subject(f"Your teacher account at {org.name}"), "htmlContent": content})
         if response.status_code not in (200, 201):
             raise HTTPException(502, "Teacher saved but invitation delivery failed; retry sending")
     except httpx.RequestError:

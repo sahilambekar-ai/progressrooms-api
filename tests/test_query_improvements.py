@@ -29,7 +29,13 @@ async def make_class(db):
 
 
 @pytest.mark.asyncio
-async def test_generation_is_bounded_idempotent_and_refreshes_rules(db_session):
+@pytest.mark.parametrize("zoom_mode,query_budget", [("disabled", 4), ("mock", 5)])
+async def test_generation_is_bounded_idempotent_and_refreshes_rules(db_session, monkeypatch, zoom_mode, query_budget):
+    from cryptography.fernet import Fernet
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "APP_ENV", "test")
+    monkeypatch.setattr(settings, "ZOOM_PROVIDER_MODE", zoom_mode)
+    monkeypatch.setattr(settings, "ZOOM_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     org, cls = await make_class(db_session)
     today = datetime.now(timezone.utc).date()
     for _ in range(2):  # Overlapping rules must not duplicate occurrences within one batch.
@@ -44,10 +50,10 @@ async def test_generation_is_bounded_idempotent_and_refreshes_rules(db_session):
     try:
         count = await SchedulingEngine.generate_occurrences_for_session(db_session, cls.id, 70)
         assert count == 11
-        assert len(statements) == 4  # parent, rules, instructors, existing starts
+        assert len(statements) == query_budget  # One additional settings read when Zoom is enabled.
         statements.clear()
         assert await SchedulingEngine.generate_occurrences_for_session(db_session, cls.id, 70) == 0
-        assert len(statements) == 4
+        assert len(statements) == query_budget
         # The request session has already loaded the old rules. Replacement must refresh it.
         for rule in list(cls.schedule_rules):
             await db_session.delete(rule)
@@ -145,3 +151,26 @@ async def test_upcoming_classes_deduplicate_enrollments(db_session):
     assert [row['id'] for row in rows] == [str(occ.id)]
     outsider = User(id=uuid.uuid4(), email='outsider@example.com', full_name='Outsider')
     assert await get_my_upcoming_classes(outsider, db_session) == []
+
+
+@pytest.mark.asyncio
+async def test_future_appointment_visible_before_enrollment_starts_but_only_within_validity(db_session):
+    from app.modules.student.router import get_my_upcoming_classes
+    org, cls = await make_class(db_session)
+    user = User(email=f'{uuid.uuid4().hex}@example.com', full_name='Future appointment student')
+    db_session.add(user)
+    await db_session.flush()
+    start = datetime.now(timezone.utc) + timedelta(hours=1)
+    db_session.add(SessionEnrollment(organization_id=org.id, session_id=cls.id,
+        user_id=user.id, valid_from=start, valid_until=start + timedelta(hours=2), status='ACTIVE'))
+    occurrences = []
+    for delta in (-1, 0, 3):
+        scheduled = start + timedelta(hours=delta)
+        occ = ClassOccurrence(session_id=cls.id, organization_id=org.id,
+            scheduled_start_at=scheduled, actual_start_at=scheduled,
+            scheduled_end_at=scheduled + timedelta(minutes=30), actual_end_at=scheduled + timedelta(minutes=30))
+        db_session.add(occ)
+        occurrences.append(occ)
+    await db_session.flush()
+    rows = await get_my_upcoming_classes(user, db_session)
+    assert [row['id'] for row in rows] == [str(occurrences[1].id)]

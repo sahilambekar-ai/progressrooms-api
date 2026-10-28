@@ -23,9 +23,14 @@ from app.modules.auth.dependencies import get_current_user
 from app.modules.zoom.service import default_host_ready
 from app.models.user import User
 
+from app.common.passwords import Password
+from app.common.validation import Name
+from app.modules.auth.rate_limits import source_limit
+from app.modules.auth.sessions import revoke_sessions
+
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-@router.post("/register", response_model=RegisterResponse)
+@router.post("/register", dependencies=[Depends(source_limit)], response_model=RegisterResponse)
 async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)):
     otp_code, record_id, msg = await AuthService.register_user(
         db=db,
@@ -46,10 +51,10 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         email=payload.email.strip().lower(),
         is_verified=False,
         otp_record_id=record_id,
-        otp_preview=otp_code if settings.AUTH_SHOW_OTP_PREVIEW else None
+        otp_preview=otp_code if settings.otp_preview_enabled else None
     )
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login", dependencies=[Depends(source_limit)], response_model=LoginResponse)
 async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await AuthService.login_with_password(
         db=db,
@@ -65,10 +70,10 @@ _DEV_TEST_ACCOUNTS = {
     "STUDENT": "student1@test.progressrooms.local",
 }
 
-@router.post("/dev-login", response_model=LoginResponse, include_in_schema=False)
+@router.post("/dev-login", dependencies=[Depends(source_limit)], response_model=LoginResponse, include_in_schema=False)
 async def dev_login(payload: DevLoginRequest, db: AsyncSession = Depends(get_db)):
     """Sign in a seeded test user. This route is unavailable unless explicitly enabled."""
-    if not settings.DEV_TEST_LOGIN_ENABLED:
+    if not settings.development_login_enabled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Development login is unavailable")
 
     email = _DEV_TEST_ACCOUNTS.get(payload.role)
@@ -104,8 +109,9 @@ async def dev_login(payload: DevLoginRequest, db: AsyncSession = Depends(get_db)
     if org:
         org_settings = await db.scalar(select(OrganizationSetting).where(OrganizationSetting.organization_id == org.id))
 
+    authenticated_version = user.session_version
     await db.commit()
-    token = create_access_token({"sub": str(user.id), "email": user.email, "role": user.role, "is_superadmin": user.is_superadmin})
+    token = create_access_token({"sub": str(user.id), "sv": authenticated_version, "email": user.email, "role": user.role, "is_superadmin": user.is_superadmin})
     return LoginResponse(
         access_token=token,
         is_verified=True,
@@ -134,8 +140,8 @@ async def dev_login(payload: DevLoginRequest, db: AsyncSession = Depends(get_db)
         },
     )
 
-@router.post("/request-otp", response_model=RequestOTPResponse)
-@router.post("/otp/generate", response_model=RequestOTPResponse)
+@router.post("/request-otp", dependencies=[Depends(source_limit)], response_model=RequestOTPResponse)
+@router.post("/otp/generate", dependencies=[Depends(source_limit)], response_model=RequestOTPResponse)
 async def request_otp(payload: RequestOTPRequest, db: AsyncSession = Depends(get_db)):
     otp_code, record_id, is_verified, requires_activation, msg = await AuthService.request_otp(
         db=db,
@@ -145,13 +151,13 @@ async def request_otp(payload: RequestOTPRequest, db: AsyncSession = Depends(get
     return RequestOTPResponse(
         message=msg,
         otp_record_id=record_id,
-        otp_preview=otp_code if settings.AUTH_SHOW_OTP_PREVIEW else None,
+        otp_preview=otp_code if settings.otp_preview_enabled else None,
         is_verified=is_verified,
         requires_activation=requires_activation
     )
 
-@router.post("/verify-otp", response_model=TokenResponse)
-@router.post("/otp/verify", response_model=TokenResponse)
+@router.post("/verify-otp", dependencies=[Depends(source_limit)], response_model=TokenResponse)
+@router.post("/otp/verify", dependencies=[Depends(source_limit)], response_model=TokenResponse)
 async def verify_otp(payload: VerifyOTPRequest, db: AsyncSession = Depends(get_db)):
     token, user = await AuthService.verify_otp(
         db=db,
@@ -248,7 +254,7 @@ from pydantic import BaseModel, Field
 
 class ProfileUpdate(BaseModel):
     billing_country: str | None = Field(None, pattern=r"^[A-Z]{2}$")
-    full_name: str = Field(min_length=1, max_length=255)
+    full_name: Name
     phone: PhoneNumber | None = None
     whatsapp_number: PhoneNumber | None = None
     address: str | None = Field(None, max_length=1000)
@@ -287,6 +293,8 @@ async def auth_context(
         "member_id": str(selected[0].id) if selected else None,
         "organization_id": str(selected[1].id) if selected else None,
         "organization_name": selected[1].name if selected else None,
+        "timezone": selected[1].timezone if selected else None,
+        "can_teach": selected[0].can_teach if selected else False,
         "organization_slug": selected[1].slug if selected else None,
         "teacher_code": selected[0].teacher_code if selected and current_user.role == "TEACHER" else None,
         "organizations": [
@@ -301,23 +309,23 @@ async def auth_context(
     }
 
 class ForgotPasswordRequest(BaseModel):
-    email: str
+    email: str = Field(min_length=1, max_length=255)
 
 class ResetPasswordRequest(BaseModel):
-    email: str
-    code: str
-    new_password: str
+    email: str = Field(min_length=1, max_length=255)
+    code: str = Field(min_length=1, max_length=6)
+    new_password: Password
 
-@router.post("/forgot-password")
+@router.post("/forgot-password", dependencies=[Depends(source_limit)])
 async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
     otp_code, record_id, msg = await AuthService.forgot_password(db, payload.email)
     return {
         "message": msg,
         "otp_record_id": record_id,
-        "otp_preview": otp_code if settings.AUTH_SHOW_OTP_PREVIEW else None
+        "otp_preview": otp_code if settings.otp_preview_enabled else None
     }
 
-@router.post("/reset-password")
+@router.post("/reset-password", dependencies=[Depends(source_limit)])
 async def reset_password(payload: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
     msg = await AuthService.reset_password(db, payload.email, payload.code, payload.new_password)
     return {"message": msg, "success": True}
@@ -333,3 +341,10 @@ async def update_preferences(payload: DashboardPreferences, current_user: User =
     current_user.dashboard_font = payload.dashboard_font
     await db.commit()
     return {"dashboard_font": current_user.dashboard_font}
+
+
+@router.post("/logout")
+async def logout(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await revoke_sessions(db, current_user)
+    await db.commit()
+    return {"message": "Signed out on all devices."}

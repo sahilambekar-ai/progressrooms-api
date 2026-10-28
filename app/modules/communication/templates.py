@@ -7,6 +7,7 @@ Includes:
 """
 
 from typing import Dict, Any, Optional
+from app.common.email_content import email_text, email_href, email_subject, first_name as recipient_first_name
 
 WHATSAPP_AUTOREPLY_TEXT = (
     "This Progress Rooms number sends automated notifications. Replies are not monitored. "
@@ -110,7 +111,7 @@ def render_billing_invoice_wa(
         f"Billing Period: {billing_period}\n"
         f"Amount: ₹{amount_inr:,.2f}\n"
         f"Due Date: {due_date_str}\n\n"
-        f"View invoice & complete payment securely:\n"
+        f"Open your studio billing workspace:\n"
         f"{invoice_url}"
     )
 
@@ -154,7 +155,7 @@ def render_billing_payment_received_wa(
         f"✅ *Payment Received — Progress Rooms*\n\n"
         f"Studio: *{studio_name}*\n"
         f"We have received your subscription payment of ₹{amount_inr:,.2f}. Thank you!\n\n"
-        f"Your studio is in good standing. View receipt:\n"
+        f"Your studio is in good standing. Review payment history:\n"
         f"{receipt_url}"
     )
 
@@ -169,7 +170,7 @@ def _email_wrapper(title: str, content_html: str) -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{title}</title>
+  <title>{email_text(title)}</title>
   <style>
     body {{
       margin: 0; padding: 0;
@@ -261,8 +262,19 @@ def render_class_reminder_2h_email(
     equipment_needed: Optional[str] = None,
     prep_instructions: Optional[str] = None
 ) -> tuple[str, str]:
-    first_name = student_name.strip().split()[0] if student_name else "Student"
-    subject = f"🌿 2-Hour Reminder: {class_name} at {studio_name} ({start_time_ist})"
+    first_name = recipient_first_name(student_name)
+    subject = email_subject(f"🌿 2-Hour Reminder: {class_name} at {studio_name} ({start_time_ist})")
+
+    first_name = email_text(first_name)
+    studio_name = email_text(studio_name)
+    class_name = email_text(class_name)
+    teacher_name = email_text(teacher_name)
+    start_time_ist = email_text(start_time_ist)
+    duration_minutes = email_text(duration_minutes)
+    suggested_join_time_ist = email_text(suggested_join_time_ist)
+    join_url = email_href(join_url)
+    equipment_needed = email_text(equipment_needed) if equipment_needed is not None else None
+    prep_instructions = email_text(prep_instructions) if prep_instructions is not None else None
 
     equipment_row = f"""<div class="details-row"><span class="details-label">Equipment</span><span class="details-value">{equipment_needed}</span></div>""" if equipment_needed else ""
     prep_block = f"""<div style="margin-top: 16px; padding: 14px; background: #E8F0E9; border-radius: 10px; font-size: 12px; color: #133623;"><strong>Preparation Note:</strong> {prep_instructions}</div>""" if prep_instructions else ""
@@ -303,8 +315,16 @@ def render_class_reminder_15m_email(
     suggested_join_time_ist: str,
     join_url: str
 ) -> tuple[str, str]:
-    first_name = student_name.strip().split()[0] if student_name else "Student"
-    subject = f"🌿 Starting in 15 Minutes: {class_name} ({start_time_ist})"
+    first_name = recipient_first_name(student_name)
+    subject = email_subject(f"🌿 Starting in 15 Minutes: {class_name} ({start_time_ist})")
+
+    first_name = email_text(first_name)
+    studio_name = email_text(studio_name)
+    class_name = email_text(class_name)
+    teacher_name = email_text(teacher_name)
+    start_time_ist = email_text(start_time_ist)
+    suggested_join_time_ist = email_text(suggested_join_time_ist)
+    join_url = email_href(join_url)
 
     body = f"""
       <span class="badge" style="background: #0C2417; color: #ffffff;">Starting Soon • 15 Minutes</span>
@@ -332,8 +352,15 @@ def render_class_correction_email(
     latest_start_time_ist: str,
     join_url: str
 ) -> tuple[str, str]:
-    first_name = student_name.strip().split()[0] if student_name else "Student"
-    subject = f"⚠️ Schedule Correction: {class_name} at {studio_name}"
+    first_name = recipient_first_name(student_name)
+    subject = email_subject(f"⚠️ Schedule Correction: {class_name} at {studio_name}")
+
+    first_name = email_text(first_name)
+    studio_name = email_text(studio_name)
+    class_name = email_text(class_name)
+    changes_summary = email_text(changes_summary)
+    latest_start_time_ist = email_text(latest_start_time_ist)
+    join_url = email_href(join_url)
 
     body = f"""
       <span class="badge" style="background: #FFF3CD; color: #856404;">Schedule Updated</span>
@@ -363,8 +390,14 @@ def render_class_cancellation_email(
     original_time_ist: str,
     reason: Optional[str] = None
 ) -> tuple[str, str]:
-    first_name = student_name.strip().split()[0] if student_name else "Student"
-    subject = f"🛑 Cancelled: {class_name} at {studio_name}"
+    first_name = recipient_first_name(student_name)
+    subject = email_subject(f"🛑 Cancelled: {class_name} at {studio_name}")
+
+    first_name = email_text(first_name)
+    studio_name = email_text(studio_name)
+    class_name = email_text(class_name)
+    original_time_ist = email_text(original_time_ist)
+    reason = email_text(reason) if reason is not None else None
 
     reason_html = f"""<div style="margin: 16px 0; padding: 14px; background: #F8D7DA; border-radius: 10px; font-size: 12px; color: #721C24;"><strong>Reason:</strong> {reason}</div>""" if reason else ""
 
@@ -400,7 +433,7 @@ def render_student_payment_received_wa(
         f"✅ *Payment Confirmed — {studio_name}*\n\n"
         f"Hello {first_name},\n"
         f"Your payment of ₹{amount_inr:,.2f} for *{class_or_pass_name}* at *{studio_name}* was successful.\n\n"
-        f"Your booking has been activated. View receipt & access your classroom:\n"
+        f"Your booking has been activated. Review your purchases & access your classroom:\n"
         f"{receipt_url}"
     )
 
@@ -413,8 +446,14 @@ def render_student_payment_received_email(
     receipt_url: str,
     payment_reference: str
 ) -> tuple[str, str]:
-    first_name = student_name.strip().split()[0] if student_name else "Student"
-    subject = f"✅ Payment Confirmed: {class_or_pass_name} ({studio_name})"
+    first_name = recipient_first_name(student_name)
+    subject = email_subject(f"✅ Payment Confirmed: {class_or_pass_name} ({studio_name})")
+
+    first_name = email_text(first_name)
+    studio_name = email_text(studio_name)
+    class_or_pass_name = email_text(class_or_pass_name)
+    receipt_url = email_href(receipt_url)
+    payment_reference = email_text(payment_reference)
 
     body = f"""
       <span class="badge" style="background: #E8F0E9; color: #133623;">Payment Received</span>
@@ -451,8 +490,15 @@ def render_billing_invoice_email(
     due_date_str: str,
     invoice_url: str
 ) -> tuple[str, str]:
-    first_name = recipient_name.strip().split()[0] if recipient_name else "Partner"
-    subject = f"💳 Progress Rooms Subscription Invoice #{invoice_number} ({studio_name})"
+    first_name = recipient_first_name(recipient_name, "Partner")
+    subject = email_subject(f"💳 Progress Rooms Subscription Invoice #{invoice_number} ({studio_name})")
+
+    first_name = email_text(first_name)
+    studio_name = email_text(studio_name)
+    invoice_number = email_text(invoice_number)
+    billing_period = email_text(billing_period)
+    due_date_str = email_text(due_date_str)
+    invoice_url = email_href(invoice_url)
 
     body = f"""
       <span class="badge" style="background: #E8F0E9; color: #133623;">Invoice Issued</span>
@@ -469,7 +515,7 @@ def render_billing_invoice_email(
         <div class="details-row" style="background:#FFF9E6; padding: 10px 8px; border-radius: 8px;"><span class="details-label" style="font-weight:700; color:#856404;">Due Date</span><span class="details-value" style="color:#856404;">{due_date_str}</span></div>
       </div>
 
-      <a href="{invoice_url}" class="cta-button">View Invoice & Pay Securely</a>
+      <a href="{invoice_url}" class="cta-button">Open Billing & Review Invoices</a>
       <p style="font-size: 11px; text-align: center; color: #81A882; margin: 0;">
         Progress Rooms Virtual Studio Operating System • Invoices & Platform Services
       </p>
@@ -484,8 +530,13 @@ def render_billing_due_soon_email(
     due_date_str: str,
     invoice_url: str
 ) -> tuple[str, str]:
-    first_name = recipient_name.strip().split()[0] if recipient_name else "Partner"
-    subject = f"⏳ Payment Due Soon: Progress Rooms Subscription ({studio_name})"
+    first_name = recipient_first_name(recipient_name, "Partner")
+    subject = email_subject(f"⏳ Payment Due Soon: Progress Rooms Subscription ({studio_name})")
+
+    first_name = email_text(first_name)
+    studio_name = email_text(studio_name)
+    due_date_str = email_text(due_date_str)
+    invoice_url = email_href(invoice_url)
 
     body = f"""
       <span class="badge" style="background: #FFF3CD; color: #856404;">Payment Due Soon</span>
@@ -500,7 +551,7 @@ def render_billing_due_soon_email(
         <div class="details-row"><span class="details-label">Due Date</span><span class="details-value">{due_date_str}</span></div>
       </div>
 
-      <a href="{invoice_url}" class="cta-button">Review & Complete Payment</a>
+      <a href="{invoice_url}" class="cta-button">Review Studio Billing</a>
       <p style="font-size: 11px; text-align: center; color: #81A882; margin: 0;">
         Paying on time ensures continuous classroom availability and student reminder delivery.
       </p>
@@ -515,8 +566,13 @@ def render_billing_overdue_email(
     days_overdue: int,
     invoice_url: str
 ) -> tuple[str, str]:
-    first_name = recipient_name.strip().split()[0] if recipient_name else "Partner"
-    subject = f"⚠️ Overdue Notice: Progress Rooms Subscription ({studio_name})"
+    first_name = recipient_first_name(recipient_name, "Partner")
+    subject = email_subject(f"⚠️ Overdue Notice: Progress Rooms Subscription ({studio_name})")
+
+    first_name = email_text(first_name)
+    studio_name = email_text(studio_name)
+    days_overdue = email_text(days_overdue)
+    invoice_url = email_href(invoice_url)
 
     body = f"""
       <span class="badge" style="background: #F8D7DA; color: #721C24;">Payment Overdue • {days_overdue} Days</span>
@@ -531,7 +587,7 @@ def render_billing_overdue_email(
         <div class="details-row"><span class="details-label">Status</span><span class="details-value" style="color:#721C24;">Action Required</span></div>
       </div>
 
-      <a href="{invoice_url}" class="cta-button" style="background-color: #721C24;">Clear Overdue Balance Now</a>
+      <a href="{invoice_url}" class="cta-button" style="background-color: #721C24;">Review Outstanding Balance</a>
       <p style="font-size: 11px; text-align: center; color: #81A882; margin: 0;">
         Please settle this balance to prevent operational service restrictions on your studio.
       </p>
@@ -546,8 +602,13 @@ def render_billing_payment_received_email(
     receipt_url: str,
     payment_reference: str
 ) -> tuple[str, str]:
-    first_name = recipient_name.strip().split()[0] if recipient_name else "Partner"
-    subject = f"✅ Payment Received: Progress Rooms Subscription ({studio_name})"
+    first_name = recipient_first_name(recipient_name, "Partner")
+    subject = email_subject(f"✅ Payment Received: Progress Rooms Subscription ({studio_name})")
+
+    first_name = email_text(first_name)
+    studio_name = email_text(studio_name)
+    receipt_url = email_href(receipt_url)
+    payment_reference = email_text(payment_reference)
 
     body = f"""
       <span class="badge" style="background: #E8F0E9; color: #133623;">Subscription Active</span>
@@ -563,7 +624,7 @@ def render_billing_payment_received_email(
         <div class="details-row"><span class="details-label">Status</span><span class="details-value" style="color:#133623;">Good Standing</span></div>
       </div>
 
-      <a href="{receipt_url}" class="cta-button">View Official Receipt</a>
+      <a href="{receipt_url}" class="cta-button">Review Payment History</a>
     """
     return subject, _email_wrapper(subject, body)
 

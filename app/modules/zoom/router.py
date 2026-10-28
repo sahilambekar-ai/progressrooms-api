@@ -1,3 +1,4 @@
+from app.common.webhook_body import read_webhook_body
 import hashlib
 import hmac
 import json
@@ -67,7 +68,7 @@ async def studio_connect(org_id: uuid.UUID, member_id: uuid.UUID, payload: Studi
                          user=Depends(get_current_user), db=Depends(get_db)):
     from app.modules.teachers.credentials import reconfirm
     member = await svc.authorize_member(db, org_id, member_id, user, owner_only=True)
-    reconfirm(user, payload.studio_password)
+    await reconfirm(user, payload.studio_password)
     state, attempt = await svc.create_attempt(db, member, user, "OAUTH", expected_email=str(payload.zoom_email) if payload.zoom_email else None, expected_host_id=payload.zoom_host_id)
     return {"authorization_url": ZoomProvider().authorize_url(state), "is_simulated": attempt.mode == "mock"}
 
@@ -272,7 +273,7 @@ async def deauthorization(request: Request, db=Depends(get_db)):
     secret = settings.ZOOM_WEBHOOK_SECRET
     if not secret:
         raise HTTPException(503, "Zoom webhook is not configured")
-    raw = await request.body()
+    raw = await read_webhook_body(request)
     stamp = request.headers.get("x-zm-request-timestamp", "")
     try:
         if abs(svc.now().timestamp() - int(stamp)) > 300:
@@ -285,10 +286,14 @@ async def deauthorization(request: Request, db=Depends(get_db)):
     try:
         data = json.loads(raw)
         payload = data["payload"]
-    except (ValueError, KeyError):
+        if not isinstance(data, dict) or not isinstance(payload, dict):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError, RecursionError):
         raise HTTPException(400, "Invalid Zoom webhook")
     if data.get("event") == "endpoint.url_validation":
         plain = payload.get("plainToken", "")
+        if not isinstance(plain, str):
+            raise HTTPException(400, "Invalid Zoom webhook")
         return {"plainToken": plain, "encryptedToken": hmac.new(secret.encode(), plain.encode(), hashlib.sha256).hexdigest()}
     if data.get("event") not in {"app_deauthorized", "app.deauthorized"}:
         return {"status": "ignored"}

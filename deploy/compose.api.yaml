@@ -35,7 +35,7 @@ services:
       - api_websites:/app/generated-websites
       - api_data:/app/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -55,6 +55,24 @@ services:
     env_file:
       - api.env
     command: ["python", "-m", "app.modules.zoom.maintenance"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: 0.25
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  meeting-email-worker:
+    image: progressrooms-api-uat:${API_IMAGE_TAG:?API_IMAGE_TAG must be set}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - api.env
+    command: ["python", "-m", "app.modules.communication.worker"]
     depends_on:
       postgres:
         condition: service_healthy

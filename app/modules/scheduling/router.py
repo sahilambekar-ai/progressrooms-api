@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, AwareDatetime, model_validator
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select, and_
 from sqlalchemy.orm import selectinload
@@ -22,21 +22,29 @@ from app.modules.organizations.zoom_service import get_or_create_occurrence_meet
 router = APIRouter(prefix="/organizations/{org_id}/occurrences", tags=["Scheduling & Calendar"])
 
 class ReschedulePayload(BaseModel):
-    new_start_at: datetime
-    new_end_at: datetime
-    reason: str
+    new_start_at: AwareDatetime
+    new_end_at: AwareDatetime
+    reason: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def valid_time_range(self):
+        if self.new_end_at <= self.new_start_at:
+            raise ValueError("End time must be after start time")
+        return self
 
 class CancelPayload(BaseModel):
-    reason: str
+    reason: str = Field(min_length=1, max_length=2000)
 
 @router.get("")
 async def get_calendar_occurrences(
     org_id: uuid.UUID,
-    start_date: datetime = Query(...),
-    end_date: datetime = Query(...),
+    start_date: AwareDatetime = Query(...),
+    end_date: AwareDatetime = Query(...),
     tenant: tuple[Organization, OrganizationMember | None] = Depends(get_current_tenant_member),
     db: AsyncSession = Depends(get_db)
 ):
+    if end_date < start_date:
+        raise HTTPException(422, "End date must be on or after start date")
     await auto_complete_expired_one_on_one_classes(db, org_id)
 
     stmt = select(ClassOccurrence).options(
@@ -174,7 +182,7 @@ async def create_join_link(org_id: uuid.UUID, occurrence_id: uuid.UUID,
                            tenant=Depends(require_org_role([UserRole.STUDIO, UserRole.TEACHER])),
                            db: AsyncSession = Depends(get_db)):
     occ = await accessible_occurrence(db, org_id, occurrence_id, tenant[1], lock=False)
-    if occ.status in {"CANCELLED", "COMPLETED"}:
+    if occ.status == "CANCELLED":
         raise HTTPException(409, "This class is no longer joinable")
 
     try:
@@ -213,7 +221,24 @@ async def teacher_agenda(org_id: uuid.UUID, tenant=Depends(require_org_role([Use
     from app.common.dates import ensure_utc
     today = [o for o in rows if ensure_utc(o.actual_start_at).astimezone(ZoneInfo(org.timezone)).date() == local_today]
     selected = today or rows
+    from app.modules.zoom.meetings import host_for_occurrence
+    can_start = {}
+    for occurrence in selected:
+        try:
+            connection = await host_for_occurrence(db, occurrence)
+            host_member = await db.get(OrganizationMember, connection.member_id)
+            can_start[occurrence.id] = bool(member and host_member and host_member.user_id == member.user_id)
+        except HTTPException:
+            can_start[occurrence.id] = False
     return {"day": "today" if today else "tomorrow", "timezone": org.timezone, "classes": [dict(
         id=str(o.id), name=o.session.name, description=o.session.full_description, start_at=o.actual_start_at.isoformat(), end_at=o.actual_end_at.isoformat(),
-        status=o.status, meeting_url=o.meeting_url, host_email=o.zoom_host_email, zoom_status=o.zoom_provisioning_status,
+        status=o.status, can_start=can_start.get(o.id, False), meeting_url=o.meeting_url, host_email=o.zoom_host_email, zoom_status=o.zoom_provisioning_status,
         is_current=ensure_utc(o.actual_start_at) <= now < ensure_utc(o.actual_end_at)) for o in selected]}
+
+
+@router.post("/{occurrence_id}/send-invite", status_code=202)
+async def send_occurrence_invites(org_id: uuid.UUID, occurrence_id: uuid.UUID,
+        tenant=Depends(require_org_role([UserRole.STUDIO, UserRole.TEACHER])), db: AsyncSession = Depends(get_db)):
+    from app.modules.communication.reminder_engine import request_meeting_invites
+    occurrence = await accessible_occurrence(db, org_id, occurrence_id, tenant[1], lock=True)
+    return await request_meeting_invites(db, occurrence)

@@ -44,6 +44,10 @@ async def get_current_user(
     if not user or user.deleted_at or user.account_status != "ACTIVE" or not user.is_verified:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
 
+    version = payload.get("sv")
+    if type(version) is not int or version != user.session_version:
+        raise HTTPException(401, "Session expired. Please sign in again.")
+
     if user.role in {"TEACHER", "STUDIO"}:
         from app.models.organization import OrganizationMember, Organization
         active = await db.scalar(select(OrganizationMember.id).join(Organization).where(
@@ -67,4 +71,10 @@ async def get_current_user_optional(
 async def require_superadmin(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role != "SUPER_ADMIN":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin access required")
+    return current_user
+
+
+async def require_student(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role != "STUDENT":
+        raise HTTPException(403, "Student account required")
     return current_user

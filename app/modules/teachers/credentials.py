@@ -6,8 +6,9 @@ from fastapi import HTTPException
 from app.core.config import settings
 from app.core.security import verify_password
 
-def reconfirm(actor, password):
-    if not actor.password_hash or not verify_password(password, actor.password_hash):
+async def reconfirm(actor, password):
+    from app.core.password_work import check_password
+    if not actor.password_hash or not await check_password(password, actor.password_hash):
         raise HTTPException(403, "Studio password is incorrect")
 
 def cipher():

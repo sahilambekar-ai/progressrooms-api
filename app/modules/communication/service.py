@@ -1,3 +1,4 @@
+from app.common.email_content import email_text
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -43,7 +44,7 @@ async def _dispatch_brevo_request(headers: dict, payload: dict) -> tuple[int, di
 async def get_or_create_settings(db: AsyncSession) -> PlatformCommunicationSetting:
     """
     Retrieves the singleton platform-wide communication setting,
-    or creates it with defaults (both channels enabled).
+    or creates it with operational email enabled and WhatsApp retired.
     """
     stmt = (
         select(PlatformCommunicationSetting)
@@ -55,13 +56,14 @@ async def get_or_create_settings(db: AsyncSession) -> PlatformCommunicationSetti
 
     if not setting:
         setting = PlatformCommunicationSetting(
-            whatsapp_enabled=True,
+            whatsapp_enabled=False,
             email_enabled=True,
         )
         db.add(setting)
         await db.commit()
         await db.refresh(setting)
 
+    setting.whatsapp_enabled = False
     return setting
 
 
@@ -83,28 +85,8 @@ def get_connection_status() -> ConnectionStatusResponse:
         sender_identity=f"{getattr(settings, 'BREVO_SENDER_NAME', 'Progress Rooms')} <{brevo_sender}>"
     )
 
-    # WhatsApp Admin Sender (Progress Rooms Admin)
-    wa_admin_num = getattr(settings, "WHATSAPP_ADMIN_NUMBER", "+91 98765 00001")
-    wa_token = getattr(settings, "WHATSAPP_API_TOKEN", "")
-    wa_admin_configured = bool(wa_token and len(wa_token.strip()) > 5)
-
-    wa_admin_status = ChannelHealthStatus(
-        configured=wa_admin_configured,
-        status="CONNECTED" if wa_admin_configured else "READY_FOR_SETUP",
-        details="Meta WhatsApp Cloud API configured for Admin sender" if wa_admin_configured else "Meta Cloud API credentials pending; ready for verification",
-        sender_identity=f"Progress Rooms Admin ({wa_admin_num})"
-    )
-
-    # WhatsApp Classes Sender (Progress Rooms Classes)
-    wa_classes_num = getattr(settings, "WHATSAPP_CLASSES_NUMBER", "+91 98765 00002")
-    wa_classes_configured = bool(wa_token and len(wa_token.strip()) > 5)
-
-    wa_classes_status = ChannelHealthStatus(
-        configured=wa_classes_configured,
-        status="CONNECTED" if wa_classes_configured else "READY_FOR_SETUP",
-        details="Meta WhatsApp Cloud API configured for Classes sender" if wa_classes_configured else "Meta Cloud API credentials pending; ready for verification",
-        sender_identity=f"Progress Rooms Classes ({wa_classes_num})"
-    )
+    wa_admin_status = ChannelHealthStatus(configured=False, status="DISABLED", details="WhatsApp notifications have been removed", sender_identity="")
+    wa_classes_status = wa_admin_status
 
     return ConnectionStatusResponse(
         email=email_status,
@@ -117,7 +99,7 @@ async def get_settings_summary(db: AsyncSession) -> CommunicationSettingsRespons
     setting = await get_or_create_settings(db)
     health = get_connection_status()
 
-    both_off = (not setting.whatsapp_enabled) and (not setting.email_enabled)
+    both_off = not setting.email_enabled
 
     return CommunicationSettingsResponse(
         whatsapp_enabled=setting.whatsapp_enabled,
@@ -140,6 +122,10 @@ async def update_settings(
 ) -> CommunicationSettingsResponse:
     setting = await get_or_create_settings(db)
     now = datetime.now(timezone.utc)
+
+    if whatsapp_enabled:
+        from fastapi import HTTPException
+        raise HTTPException(422, "WhatsApp notifications have been removed")
 
     # Record WhatsApp toggle audit log
     if whatsapp_enabled is not None and whatsapp_enabled != setting.whatsapp_enabled:
@@ -243,7 +229,7 @@ async def send_test_message(
                 },
                 "to": [{"email": recipient, "name": "Authorized Test Recipient"}],
                 "subject": subject,
-                "htmlContent": f"<div style='font-family:sans-serif;padding:20px;border:2px dashed #81A882;border-radius:8px;'><h3 style='color:#0C2417;'>🌿 Progress Rooms Notification Test</h3><p>{body_text.replace(chr(10), '<br>')}</p></div>"
+                "htmlContent": f"<div style='font-family:sans-serif;padding:20px;border:2px dashed #81A882;border-radius:8px;'><h3 style='color:#0C2417;'>🌿 Progress Rooms Notification Test</h3><p>{email_text(body_text).replace(chr(10), '<br>')}</p></div>"
             }
             try:
                 status_code, json_data, text_data = await _dispatch_brevo_request(headers=headers, payload=send_payload)
@@ -336,52 +322,9 @@ async def send_test_message(
             )
 
     elif target_channel in ["WHATSAPP_ADMIN", "WHATSAPP_CLASSES"]:
-        if not setting.whatsapp_enabled:
-            # Log suppression
-            log_entry = CommunicationLog(
-                recipient_user_id=admin_user.id,
-                recipient_phone=recipient,
-                channel=target_channel,
-                message_type="TEST_MESSAGE",
-                status="SUPPRESSED",
-                suppression_reason="Suppressed: whatsapp disabled",
-                subject_or_title=subject,
-                body_preview=body_text[:200],
-                metadata_json={"test": True, "initiated_by": admin_user.email}
-            )
-            db.add(log_entry)
-            await db.commit()
-            return CommunicationTestResponse(
-                success=False,
-                channel=target_channel,
-                recipient=recipient,
-                status="SUPPRESSED",
-                suppression_reason="Suppressed: whatsapp disabled",
-                details="WhatsApp notifications are currently turned off at the platform level. Scope applies to all studios."
-            )
+        from fastapi import HTTPException
+        raise HTTPException(410, "WhatsApp notifications have been removed")
 
-        # Simulated or Meta Cloud API dispatch
-        msg_id = f"wa_test_{uuid.uuid4().hex[:8]}"
-        log_entry = CommunicationLog(
-            recipient_user_id=admin_user.id,
-            recipient_phone=recipient,
-            channel=target_channel,
-            message_type="TEST_MESSAGE",
-            status="SIMULATED",
-            subject_or_title=subject,
-            body_preview=body_text[:200],
-            metadata_json={"simulated": True, "sender_channel": target_channel, "message_id": msg_id}
-        )
-        db.add(log_entry)
-        await db.commit()
-        return CommunicationTestResponse(
-            success=False,
-            channel=target_channel,
-            recipient=recipient,
-            status="SIMULATED",
-            message_id=msg_id,
-            details="WhatsApp test simulated; provider delivery is not connected."
-        )
 
     else:
         return CommunicationTestResponse(

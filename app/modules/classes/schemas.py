@@ -2,17 +2,18 @@ import uuid
 from datetime import time, date
 from decimal import Decimal
 from pydantic import BaseModel, Field, model_validator, field_serializer
+from app.common.validation import Name, Slug, Currency
 from app.common.enums import SessionType, SkillLevel, PricingType, InstructorRole
 
 class ClassTypeCreate(BaseModel):
-    name: str
-    slug: str
+    name: Name
+    slug: Slug
     description: str | None = None
 
 class ClassTypeResponse(BaseModel):
     id: uuid.UUID
-    name: str
-    slug: str
+    name: Name
+    slug: Slug
     description: str | None
 
     class Config:
@@ -38,11 +39,11 @@ class ClassPackage(BaseModel):
 
 class SessionPricingCreate(BaseModel):
     pricing_type: PricingType = PricingType.MONTHLY
-    price: float = Field(ge=0)
+    price: Decimal = Field(ge=0, max_digits=10, decimal_places=2)
     packages: list[ClassPackage] | None = Field(default=None, min_length=1, max_length=20)
-    currency: str = "INR"
-    total_classes: int | None = None
-    validity_days: int | None = 30
+    currency: Currency = "INR"
+    total_classes: int | None = Field(default=None, ge=1, le=10000)
+    validity_days: int | None = Field(default=30, ge=1, le=3650)
 
     @model_validator(mode="after")
     def validate_packages(self):
@@ -76,17 +77,17 @@ class ScheduleRuleCreate(BaseModel):
 
 class SessionCreate(BaseModel):
     class_type_id: uuid.UUID
-    name: str
-    slug: str
-    short_description: str | None = None
+    name: Name
+    slug: Slug
+    short_description: str | None = Field(default=None, max_length=500)
     full_description: str | None = None
     session_type: SessionType = SessionType.GROUP
     capacity: int | None = Field(default=None, ge=1)
-    min_age: int | None = None
-    max_age: int | None = None
+    min_age: int | None = Field(default=None, ge=0, le=150)
+    max_age: int | None = Field(default=None, ge=0, le=150)
     skill_level: SkillLevel = SkillLevel.ALL_LEVELS
-    duration_minutes: int = 60
-    language: str = "English"
+    duration_minutes: int = Field(default=60, ge=1, le=1440)
+    language: str = Field(default="English", min_length=1, max_length=50)
     is_public: bool = True
     is_active: bool = True
     instructor_member_ids: list[uuid.UUID] = []
@@ -94,14 +95,22 @@ class SessionCreate(BaseModel):
     requirements: SessionRequirementCreate | None = None
     schedule_rules: list[ScheduleRuleCreate] = []
 
+    @model_validator(mode="after")
+    def validate_ages(self):
+        if self.min_age is not None and self.max_age is not None and self.min_age > self.max_age:
+            raise ValueError("Minimum age must not exceed maximum age")
+        return self
+
 class SessionUpdate(BaseModel):
     acknowledge_zoom_host_impact: bool = False
-    name: str | None = None
+    name: Name | None = None
+    min_age: int | None = Field(default=None, ge=0, le=150)
+    max_age: int | None = Field(default=None, ge=0, le=150)
     capacity: int | None = Field(default=None, ge=1)
-    duration_minutes: int | None = None
+    duration_minutes: int | None = Field(default=None, ge=1, le=1440)
     is_active: bool | None = None
     is_public: bool | None = None
-    short_description: str | None = None
+    short_description: str | None = Field(default=None, max_length=500)
     full_description: str | None = None
     skill_level: SkillLevel | None = None
     session_type: SessionType | None = None
@@ -114,15 +123,15 @@ class SessionToggleStatus(BaseModel):
     is_active: bool | None = None
 
 class OneOnOneSessionCreate(BaseModel):
-    title: str = Field(default="1-on-1 Private Session", min_length=1, max_length=255)
+    title: Name = "1-on-1 Private Session"
     teacher_member_id: uuid.UUID
     student_user_id: uuid.UUID
     full_description: str | None = None
-    offer_price: float | None = Field(default=None, ge=0)
+    offer_price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
     date: date
     start_time: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
     end_time: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
-    price: float = Field(default=0.0, ge=0)
+    price: Decimal = Field(default=Decimal("0"), ge=0, max_digits=10, decimal_places=2)
 
     @model_validator(mode="after")
     def validate_range(self):

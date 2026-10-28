@@ -124,7 +124,8 @@ async def studio_details(org_id: uuid.UUID, admin: User = Depends(require_supera
         "zoom_join_before_host", "zoom_cloud_recording_mode")
     profile = {field: getattr(settings, field) if settings else None for field in fields}
     # This endpoint is super-admin-only. Never return Zoom keys or payment credentials.
-    profile["account_number"] = settings.account_number_enc if settings else None
+    from app.core.financial_data import mask_account
+    profile["account_number"] = mask_account(settings.account_number_enc) if settings else None
     owners = (await db.execute(select(User.full_name, User.email).join(OrganizationMember,
         OrganizationMember.user_id == User.id).where(OrganizationMember.organization_id == org_id,
         OrganizationMember.role == "STUDIO"))).all()

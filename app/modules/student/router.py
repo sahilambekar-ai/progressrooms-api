@@ -13,7 +13,7 @@ from app.models.session import Session
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent
 from app.models.user import User
 from app.models.attendance import AttendanceRecord
-from app.modules.auth.dependencies import get_current_user
+from app.modules.auth.dependencies import get_current_user, require_student
 from app.common.enums import EnrollmentStatus
 from app.modules.organizations.zoom_service import get_or_create_occurrence_meeting, ZoomAuthError
 
@@ -23,7 +23,7 @@ from app.models.membership_tier import MembershipTier
 class RescheduleBookingRequest(BaseModel):
     target_occurrence_id: uuid.UUID
 
-router = APIRouter(prefix="/student", tags=["Student Portal"])
+router = APIRouter(prefix="/student", tags=["Student Portal"], dependencies=[Depends(require_student)])
 
 @router.get("/studios")
 async def get_my_studios(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -35,7 +35,7 @@ async def get_my_studios(current_user: User = Depends(get_current_user), db: Asy
         Organization.status == "ACTIVE", Organization.deleted_at.is_(None),
         or_(Organization.id.in_(assigned), Organization.id.in_(enrolled))
     ).order_by(Organization.name))).scalars().all()
-    return [{"id": str(org.id), "name": org.name, "slug": org.slug} for org in studios]
+    return [{"id": str(org.id), "name": org.name, "slug": org.slug, "timezone": org.timezone} for org in studios]
 
 
 @router.get("/enrollments")
@@ -111,13 +111,15 @@ async def get_my_upcoming_classes(
     now = datetime.now(timezone.utc)
     future = now + timedelta(days=30)
 
-    # Get active session IDs
+    # An appointment's enrollment may begin at its future start time. Show
+    # classes covered by that enrollment before it starts, too.
     enr_stmt = select(SessionEnrollment.session_id).where(
         SessionEnrollment.user_id == current_user.id,
         SessionEnrollment.status == EnrollmentStatus.ACTIVE.value,
-        SessionEnrollment.valid_from <= now,
-        or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until > now)
-    )
+        SessionEnrollment.valid_from <= ClassOccurrence.actual_start_at,
+        or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until > now),
+        or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until > ClassOccurrence.actual_start_at)
+    ).correlate(ClassOccurrence)
     excused_occ_ids = select(AttendanceRecord.class_occurrence_id).join(
         SessionEnrollment, AttendanceRecord.session_enrollment_id == SessionEnrollment.id
     ).where(
@@ -130,7 +132,7 @@ async def get_my_upcoming_classes(
     ).where(
         ClassOccurrence.session_id.in_(enr_stmt),
         ClassOccurrence.id.not_in(excused_occ_ids),
-        ClassOccurrence.status == "SCHEDULED",
+        ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED", "IN_PROGRESS"]),
         ClassOccurrence.session_id.in_(select(Session.id).join(Organization).where(
             Session.is_active == True, Session.deleted_at.is_(None),
             Organization.status == "ACTIVE", Organization.deleted_at.is_(None))),
@@ -145,21 +147,8 @@ async def get_my_upcoming_classes(
     for o in occurrences:
         occ_start = o.actual_start_at.replace(tzinfo=timezone.utc) if o.actual_start_at.tzinfo is None else o.actual_start_at
         occ_end = o.actual_end_at.replace(tzinfo=timezone.utc) if o.actual_end_at.tzinfo is None else o.actual_end_at
-        seconds_to_start = (occ_start - now).total_seconds()
-
-        if o.status not in {"SCHEDULED", "RESCHEDULED", "IN_PROGRESS"}:
-            can_join = False
-            reason = f"Class is {o.status.lower()}"
-        elif occ_end <= now:
-            can_join = False
-            reason = "Class has ended"
-        elif seconds_to_start > 900:
-            can_join = False
-            mins = int(seconds_to_start // 60)
-            reason = "Opens 15 minutes before class" if mins > 15 else f"Opens in {mins} minutes"
-        else:
-            can_join = True
-            reason = "Ready to join"
+        can_join = o.status != "CANCELLED"
+        reason = "Ready to join" if can_join else "Class is cancelled"
 
         results.append({
             "id": str(o.id),
@@ -188,55 +177,40 @@ async def get_class_meeting_url(
     ).where(ClassOccurrence.id == occurrence_id)
     occ_res = await db.execute(occ_stmt)
     occ = occ_res.scalar_one_or_none()
-    if not occ or not occ.session or not occ.session.is_active or occ.session.deleted_at:
+    if not occ or not occ.session or ((not occ.session.is_active or occ.session.deleted_at) and occ.status != "COMPLETED"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class occurrence not found")
 
-    # Check enrollment & available credits
+    from app.common.dates import ensure_utc
     now = datetime.now(timezone.utc)
+    historical = ensure_utc(occ.actual_end_at) < now
+    access_at = ensure_utc(occ.actual_start_at) if historical else now
     enr_stmt = select(SessionEnrollment).where(
         SessionEnrollment.session_id == occ.session_id,
+        SessionEnrollment.organization_id == occ.organization_id,
         SessionEnrollment.user_id == current_user.id,
-        SessionEnrollment.status == EnrollmentStatus.ACTIVE.value,
-        SessionEnrollment.valid_from <= now,
-        or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until > now)
+        SessionEnrollment.status.in_(["ACTIVE", "EXPIRED"] if historical else ["ACTIVE"]),
+        SessionEnrollment.valid_from <= access_at,
+        or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until >= access_at)
     )
     from app.modules.commerce.service import available_credit
     candidates = (await db.execute(enr_stmt)).scalars().all()
     enr = None
     for candidate in candidates:
-        if await available_credit(db, candidate, lock_pass=False):
+        if historical or await available_credit(db, candidate, lock_pass=False):
             enr = candidate
             break
     if not enr:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have an active enrollment or available credits for this class."
-        )
-
-    # Check join time window: within 15 minutes of start and before end
-    from app.modules.billing.saas import require_operational_access
-    await require_operational_access(db, occ.organization_id)
-    occ_start = occ.actual_start_at.replace(tzinfo=timezone.utc) if occ.actual_start_at.tzinfo is None else occ.actual_start_at
-    occ_end = occ.actual_end_at.replace(tzinfo=timezone.utc) if occ.actual_end_at.tzinfo is None else occ.actual_end_at
-    seconds_until_start = (occ_start - now).total_seconds()
-
-    if occ_end <= now or occ.status not in {"SCHEDULED", "RESCHEDULED", "IN_PROGRESS"}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This class is no longer open for joining."
-        )
-    if seconds_until_start > 900: # more than 15 mins before start
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Meeting link unlocks 15 minutes before scheduled class start time."
-        )
+        raise HTTPException(403, "You do not have an eligible enrollment or available credits for this class.")
+    if occ.status == "CANCELLED":
+        raise HTTPException(403, "This class is cancelled.")
 
     # Provision or retrieve real meeting room
     organization = occ.session.organization
     try:
         meeting_data = await get_or_create_occurrence_meeting(db, occ, organization, is_host=False)
         from app.modules.billing.platform import record_join
-        await record_join(db, organization, current_user, enr, occ)
+        if not historical:
+            await record_join(db, organization, current_user, enr, occ)
         await db.commit()
         return {
             "meeting_url": meeting_data["target_url"],
@@ -493,6 +467,9 @@ async def get_my_attendance(
     default_zone = ZoneInfo("Asia/Kolkata")
     start = datetime(year, number, 1, tzinfo=default_zone).astimezone(timezone.utc)
     end = datetime(year + (number == 12), number % 12 + 1, 1, tzinfo=default_zone).astimezone(timezone.utc)
+    # Include timezone boundaries, then filter by each studio local month.
+    start -= timedelta(days=1)
+    end += timedelta(days=1)
 
     stmt = (
         select(ClassOccurrence, Session, AttendanceRecord, SessionEnrollment, Organization)
@@ -533,6 +510,8 @@ async def get_my_attendance(
         org_zone = ZoneInfo(org.timezone or "Asia/Kolkata")
         occ_start = occ.actual_start_at.replace(tzinfo=timezone.utc) if occ.actual_start_at.tzinfo is None else occ.actual_start_at
         local = occ_start.astimezone(org_zone)
+        if local.strftime("%Y-%m") != month:
+            continue
         status_val = calendar_status(occ.actual_start_at, occ.status, record.status if record else None, now_utc)
 
         teacher_name = (
@@ -548,6 +527,10 @@ async def get_my_attendance(
             "date": local.date().isoformat(),
             "time": local.strftime("%I:%M %p"),
             "startAt": occ_start.isoformat(),
+            "endAt": (occ.actual_end_at.replace(tzinfo=timezone.utc) if occ.actual_end_at.tzinfo is None else occ.actual_end_at).isoformat(),
+            "meetingAvailable": occ.status != "CANCELLED",
+            "meetingUrl": occ.meeting_url if occ.status != "CANCELLED" else None,
+            "description": session.full_description,
             "sessionTitle": session.name,
             "status": status_val,
             "remarks": record.notes if record else "",
@@ -560,3 +543,13 @@ async def get_my_attendance(
         result.append(event)
     return result
 
+
+
+@router.post("/classes/{occurrence_id}/send-invite", status_code=202)
+async def send_my_class_invite(occurrence_id: uuid.UUID, current_user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db)):
+    from app.modules.communication.reminder_engine import request_meeting_invites
+    occurrence = await db.scalar(select(ClassOccurrence).where(ClassOccurrence.id == occurrence_id).with_for_update())
+    if not occurrence:
+        raise HTTPException(404, "Class not found")
+    return await request_meeting_invites(db, occurrence, recipient_id=current_user.id)

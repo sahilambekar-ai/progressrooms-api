@@ -1,7 +1,8 @@
+from app.common.profile_consent import attest_profile_change
 import math
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from app.common.phone import PhoneNumber
 from datetime import datetime, timezone
 from typing import Literal
@@ -19,6 +20,8 @@ from app.modules.classes.service import auto_complete_expired_one_on_one_classes
 router = APIRouter(prefix="/students", tags=["Students Directory"])
 
 class StudentUpdate(BaseModel):
+    profile_consent_confirmed: bool = False
+    profile_consent_reference: str | None = Field(None, min_length=1, max_length=255)
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     full_name: str | None = Field(None, min_length=1, max_length=255)
     phone: PhoneNumber
@@ -28,6 +31,12 @@ class StudentUpdate(BaseModel):
     status: Literal["ACTIVE", "INACTIVE", "SUSPENDED"] | None = None
     student_notes: str | None = Field(None, max_length=5000)
     teacher_member_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def reject_null_status(self):
+        if "status" in self.model_fields_set and self.status is None:
+            raise ValueError("Student status cannot be null")
+        return self
 
 @router.get("")
 async def list_students(page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100),
@@ -86,6 +95,10 @@ async def update_student(record_id: uuid.UUID, payload: StudentUpdate,
         raise HTTPException(404, "Student not found")
     if "full_name" in payload.model_fields_set and payload.full_name is None:
         raise HTTPException(422, "Student name is required")
+    changed = [key for key in ("full_name", "phone", "whatsapp_number", "address", "location")
+               if key in payload.model_fields_set and (getattr(student, key) or None) != (getattr(payload, key) or None)]
+    attest_profile_change(db, actor=current_user, subject=student, organization_id=org.id,
+        changed_fields=changed, confirmed=payload.profile_consent_confirmed, reference=payload.profile_consent_reference)
     for key in ("full_name", "phone", "whatsapp_number", "address", "location"):
         if key in payload.model_fields_set:
             setattr(student, key, getattr(payload, key))
@@ -112,6 +125,7 @@ class AddStudent(BaseModel):
     email: EmailStr
     class_id: uuid.UUID
     teacher_member_id: uuid.UUID | None = None
+    studio_id: uuid.UUID | None = None
 
 @router.post("", status_code=201)
 async def add_registered_student(payload: AddStudent, current_user: User = Depends(get_current_user),
@@ -119,7 +133,7 @@ async def add_registered_student(payload: AddStudent, current_user: User = Depen
     """Owner-managed class admission; does not create an account or record a payment."""
     from datetime import datetime, timezone
     from app.models.session import Session, SessionInstructor
-    org, _ = await resolve_staff_studio(db, current_user, owner_only=True)
+    org, _ = await resolve_staff_studio(db, current_user, payload.studio_id, owner_only=True)
     student = await db.scalar(select(User).where(User.email == payload.email.lower(), User.role == "STUDENT",
         User.is_active == True, User.is_verified == True, User.deleted_at.is_(None), User.account_status == "ACTIVE"))
     if not student:
