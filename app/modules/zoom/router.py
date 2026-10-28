@@ -5,7 +5,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
-from typing import Annotated
+from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from pydantic import EmailStr, BaseModel, Field
 from sqlalchemy import select
@@ -35,6 +35,16 @@ class CallbackRequest(BaseModel):
 
 class ConfirmRequest(BaseModel):
     confirmation_id: uuid.UUID
+
+
+class RestartRequest(BaseModel):
+    state: str = Field(min_length=20, max_length=512)
+    kind: Literal["OAUTH", "REQUEST"] = "OAUTH"
+
+
+@router.post("/integrations/zoom/restart")
+async def restart_authorization(payload: RestartRequest, user=Depends(get_current_user), db=Depends(get_db)):
+    return await svc.restart_authorization(db, payload.state, user, payload.kind)
 
 
 @router.get(base)

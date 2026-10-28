@@ -476,7 +476,7 @@ async def test_public_session_buying_information(client, db_session):
     assert data["availability"]["capacity"] == 20
     assert data["availability"]["remaining_spots"] == 20
     assert "at least 2 hours before class start" in data["cancellation_terms"]
-    assert "Unused session credits remain available within the pass validity" in data["cancellation_terms"]
+    assert "Unused sessions remain available within the pass validity" in data["cancellation_terms"]
     assert data["purchase_policy"]["version"]
     assert data["purchase_policy"]["terms"] == data["cancellation_terms"]
     assert "refunds_supported" not in data["purchase_policy"]

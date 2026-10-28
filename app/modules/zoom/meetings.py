@@ -56,7 +56,7 @@ async def meeting_access(db, occurrence, org, *, is_host=False, actor_user_id=No
     if not occ or occ.status == "CANCELLED":
         raise HTTPException(409, "This class is no longer joinable")
     session = await db.get(Session, occ.session_id)
-    if not session or ((not session.is_active or session.deleted_at) and occ.status != "COMPLETED"):
+    if not session or ((session.deleted_at or (not session.is_active and session.session_type != "ONE_TO_ONE")) and occ.status != "COMPLETED"):
         raise HTTPException(409, "This class is inactive")
     # Explicit, externally managed class links remain participant links, never Zoom host credentials.
     if occ.meeting_url and not occ.meeting_provider and not occ.zoom_connection_id:
@@ -133,7 +133,7 @@ def persist_meeting(occ, conn, data):
     occ.zoom_provisioning_status = "READY"
 
 
-async def synchronize(db, occ, action, *, start=None, end=None):
+async def synchronize(db, occ, action, *, start=None, end=None, topic=None):
     if not occ.provider_meeting_id:
         return
     conn = await host_for_occurrence(db, occ)
@@ -145,7 +145,8 @@ async def synchronize(db, occ, action, *, start=None, end=None):
         else:
             await check_conflicts(db, occ, conn, start, end)
             await provider.update(token, occ.provider_meeting_id, {"start_time": ensure_utc(start).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "duration": max(1, int((end - start).total_seconds() / 60))})
+                "duration": max(1, int((end - start).total_seconds() / 60)),
+                **({"topic": topic} if topic is not None else {})})
     except ProviderError as exc:
         if exc.invalid_grant:
             conn.status, conn.tokens_enc = "RECONNECT_REQUIRED", None

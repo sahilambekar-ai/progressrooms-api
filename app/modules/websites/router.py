@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.organization import Organization, OrganizationMember, OrganizationSetting
 from app.models.website import OrganizationWebsite, WebsiteTemplate
-from app.models.session import Session, SessionInstructor
+from app.models.session import Session, SessionInstructor, SessionPricing
 from app.models.schedule import ClassOccurrence
 from app.models.commerce import SessionEnrollment
 from app.models.membership_tier import MembershipTier, MembershipTierClass
@@ -150,7 +150,7 @@ async def get_public_organization_website(org_slug: str, db: AsyncSession = Depe
     await require_operational_access(db, org.id)
 
     from app.models.commerce import SessionEnrollment
-    active_public_sessions = [s for s in org.sessions if s.is_public and s.is_active and s.deleted_at is None]
+    active_public_sessions = [s for s in org.sessions if s.is_public and s.is_active and s.deleted_at is None and not (s.session_type == "ONE_TO_ONE" and s.pricing and s.pricing.pricing_type == "PER_SESSION")]
     enrollment_counts = {}
     if active_public_sessions:
         enrollment_counts = dict((await db.execute(
@@ -209,7 +209,7 @@ async def get_public_organization_website(org_slug: str, db: AsyncSession = Depe
                "class_packages": t.class_packages or [],
                "classes": [{"id": str(c.session.id), "name": c.session.name,
                             "total_classes": sum(p["total_classes"] for p in (t.class_packages or []) if p["session_id"] == str(c.session.id)) or None} for c in t.classes
-                           if c.session.is_active and c.session.is_public and c.session.deleted_at is None and c.session.organization_id == org.id]}
+                           if c.session.id in {s.id for s in active_public_sessions} and c.session.organization_id == org.id]}
               for t in tiers]
     return {
         "purchase_policy": purchase_policy(),
@@ -256,6 +256,7 @@ async def get_public_session_detail(org_slug: str, session_slug: str, db: AsyncS
         Organization.status == "ACTIVE",
         Organization.deleted_at.is_(None),
         Session.slug == session_slug,
+        ~((Session.session_type == "ONE_TO_ONE") & Session.pricing.has(SessionPricing.pricing_type == "PER_SESSION")),
         Session.is_public == True,
         Session.is_active == True,
         Session.deleted_at.is_(None)

@@ -63,12 +63,12 @@ async def record_join(db, org, user, enrollment, occurrence):
     if not enrollment or enrollment.organization_id != org.id or enrollment.user_id != user.id or (
         occurrence.organization_id != org.id or enrollment.session_id != occurrence.session_id):
         raise HTTPException(403, "No active subscription for this class")
-    if enrollment.status != "ACTIVE" or ensure_utc(enrollment.valid_from) > now or (
-        enrollment.valid_until and ensure_utc(enrollment.valid_until) <= now):
+    if enrollment.status != "ACTIVE" or ensure_utc(enrollment.valid_from) > ensure_utc(occurrence.actual_start_at) or (
+        enrollment.valid_until and ensure_utc(enrollment.valid_until) < ensure_utc(occurrence.actual_start_at)):
         raise HTTPException(403, "Your subscription is no longer active")
     from app.modules.commerce.service import available_credit
     if not await available_credit(db, enrollment):
-        raise HTTPException(403, "No class credits are available")
+        raise HTTPException(403, "Your pass or course has no sessions remaining")
     await finalize_months(db, org, now)
     event = StudentJoinEvent(organization_id=org.id, user_id=user.id, enrollment_id=enrollment.id,
         occurrence_id=occurrence.id, month=month_at(org, now), clicked_at=now)

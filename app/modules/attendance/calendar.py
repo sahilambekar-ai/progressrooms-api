@@ -63,7 +63,8 @@ async def teacher_calendar(org_id: uuid.UUID, teacher_id: uuid.UUID,
         .outerjoin(TeacherAttendance, and_(TeacherAttendance.class_occurrence_id == ClassOccurrence.id,
                                           TeacherAttendance.teacher_member_id == teacher_id))
         .where(ClassOccurrence.organization_id == org_id, assigned_occurrence(teacher_id),
-               ClassOccurrence.actual_start_at >= start, ClassOccurrence.actual_start_at < end)
+               ClassOccurrence.actual_start_at >= start, ClassOccurrence.actual_start_at < end,
+               (Session.deleted_at.is_(None) | (ClassOccurrence.status == "COMPLETED")))
         .order_by(ClassOccurrence.actual_start_at))).all()
     name = await db.scalar(select(User.full_name).where(User.id == teacher.user_id))
     return [event_dict(occ, session, record.status if record else None, record.notes if record else None,
@@ -111,6 +112,8 @@ async def student_calendar(org_id: uuid.UUID, student_id: uuid.UUID,
         AttendanceRecord.session_enrollment_id == SessionEnrollment.id)).where(
         ClassOccurrence.organization_id == org_id, ClassOccurrence.actual_start_at >= start,
         ClassOccurrence.actual_start_at < end,
+        (Session.deleted_at.is_(None) | (ClassOccurrence.status == "COMPLETED")),
+        ((SessionEnrollment.status != "CANCELLED") | AttendanceRecord.id.is_not(None)),
         # Historical records remain visible even when a pass later expires.
         ClassOccurrence.actual_start_at >= SessionEnrollment.valid_from,
         (SessionEnrollment.valid_until.is_(None) | (ClassOccurrence.actual_start_at <= SessionEnrollment.valid_until)))

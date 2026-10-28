@@ -47,11 +47,12 @@ async def get_calendar_occurrences(
         raise HTTPException(422, "End date must be on or after start date")
     await auto_complete_expired_one_on_one_classes(db, org_id)
 
-    stmt = select(ClassOccurrence).options(
+    stmt = select(ClassOccurrence).join(Session, Session.id == ClassOccurrence.session_id).options(
         selectinload(ClassOccurrence.session),
         selectinload(ClassOccurrence.instructor).selectinload(OrganizationMember.user)
     ).where(
         ClassOccurrence.organization_id == org_id,
+        (Session.deleted_at.is_(None) | (ClassOccurrence.status == "COMPLETED")),
         ClassOccurrence.actual_start_at >= start_date,
         ClassOccurrence.actual_start_at <= end_date
     ).order_by(ClassOccurrence.actual_start_at.asc())
@@ -212,8 +213,8 @@ async def teacher_agenda(org_id: uuid.UUID, tenant=Depends(require_org_role([Use
     local_today = now.astimezone(ZoneInfo(org.timezone)).date()
     start = datetime.combine(local_today, time.min, ZoneInfo(org.timezone)).astimezone(timezone.utc)
     end = start + timedelta(days=2)
-    stmt = select(ClassOccurrence).options(selectinload(ClassOccurrence.session)).where(
-        ClassOccurrence.organization_id == org_id, ClassOccurrence.actual_start_at >= start,
+    stmt = select(ClassOccurrence).join(Session, Session.id == ClassOccurrence.session_id).options(selectinload(ClassOccurrence.session)).where(
+        ClassOccurrence.organization_id == org_id, Session.deleted_at.is_(None), ClassOccurrence.actual_start_at >= start,
         ClassOccurrence.actual_start_at < end, ClassOccurrence.status != "CANCELLED").order_by(ClassOccurrence.actual_start_at)
     if member and member.role == "TEACHER":
         stmt = stmt.where(assigned_occurrence(member.id))
@@ -230,9 +231,18 @@ async def teacher_agenda(org_id: uuid.UUID, tenant=Depends(require_org_role([Use
             can_start[occurrence.id] = bool(member and host_member and host_member.user_id == member.user_id)
         except HTTPException:
             can_start[occurrence.id] = False
+    from app.models.communication import MeetingEmailDelivery
+    from sqlalchemy import func
+    mail_counts = {}
+    if selected:
+        counts = (await db.execute(select(MeetingEmailDelivery.class_occurrence_id, MeetingEmailDelivery.status, func.count())
+            .where(MeetingEmailDelivery.class_occurrence_id.in_([o.id for o in selected]))
+            .group_by(MeetingEmailDelivery.class_occurrence_id, MeetingEmailDelivery.status))).all()
+        for occurrence_id, status, count in counts:
+            mail_counts.setdefault(occurrence_id, {})[status] = count
     return {"day": "today" if today else "tomorrow", "timezone": org.timezone, "classes": [dict(
         id=str(o.id), name=o.session.name, description=o.session.full_description, start_at=o.actual_start_at.isoformat(), end_at=o.actual_end_at.isoformat(),
-        status=o.status, can_start=can_start.get(o.id, False), meeting_url=o.meeting_url, host_email=o.zoom_host_email, zoom_status=o.zoom_provisioning_status,
+        email_deliveries=mail_counts.get(o.id, {}), status=o.status, can_start=can_start.get(o.id, False), meeting_url=o.meeting_url, host_email=o.zoom_host_email, zoom_status=o.zoom_provisioning_status,
         is_current=ensure_utc(o.actual_start_at) <= now < ensure_utc(o.actual_end_at)) for o in selected]}
 
 

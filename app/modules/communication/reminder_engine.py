@@ -49,7 +49,8 @@ async def recipients_for(db, occ):
         SessionEnrollment.organization_id == occ.organization_id,
         SessionEnrollment.status == "ACTIVE", SessionEnrollment.valid_from <= occ.actual_start_at,
         or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until >= occ.actual_start_at),
-        or_(SessionEnrollment.total_sessions.is_(None), SessionEnrollment.sessions_attended < SessionEnrollment.total_sessions),
+        or_(SessionEnrollment.total_sessions.is_(None), SessionEnrollment.sessions_attended < SessionEnrollment.total_sessions,
+            (SessionEnrollment.purchase_order_id.is_(None) & SessionEnrollment.session.has(Session.session_type == "ONE_TO_ONE"))),
         User.is_active.is_(True)))).all())
     teachers = select(User).join(OrganizationMember, OrganizationMember.user_id == User.id).where(
         OrganizationMember.organization_id == occ.organization_id, OrganizationMember.is_active.is_(True), User.is_active.is_(True))
@@ -79,6 +80,37 @@ async def queue_meeting_email(db, occ, message_type, event_key, *, recipient_id=
         count += 1
     await db.flush()
     return count
+
+
+async def queue_generated_invites(db, occurrences):
+    """New occurrences have no outbox rows yet; resolve their recipients in one query."""
+    if not occurrences:
+        return 0
+    now = datetime.now(timezone.utc)
+    by_id = {o.id: o for o in occurrences if ensure_utc(o.actual_start_at) > now}
+    if not by_id:
+        return 0
+    students = select(ClassOccurrence.id, User.id).select_from(ClassOccurrence).join(
+        SessionEnrollment, SessionEnrollment.session_id == ClassOccurrence.session_id).join(
+        User, User.id == SessionEnrollment.user_id).where(
+        ClassOccurrence.id.in_(by_id), User.is_active.is_(True),
+        SessionEnrollment.organization_id == ClassOccurrence.organization_id,
+        SessionEnrollment.status == "ACTIVE", SessionEnrollment.valid_from <= ClassOccurrence.actual_start_at,
+        or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until >= ClassOccurrence.actual_start_at),
+        or_(SessionEnrollment.total_sessions.is_(None), SessionEnrollment.sessions_attended < SessionEnrollment.total_sessions))
+    teachers = select(ClassOccurrence.id, User.id).select_from(ClassOccurrence).join(
+        OrganizationMember, OrganizationMember.id == ClassOccurrence.instructor_id).join(
+        User, User.id == OrganizationMember.user_id).where(ClassOccurrence.id.in_(by_id),
+        OrganizationMember.organization_id == ClassOccurrence.organization_id,
+        OrganizationMember.is_active.is_(True), User.is_active.is_(True))
+    recipients = set((await db.execute(students.union(teachers))).all())
+    for occurrence_id, user_id in recipients:
+        occ = by_id[occurrence_id]
+        db.add(MeetingEmailDelivery(class_occurrence_id=occ.id, recipient_user_id=user_id,
+            event_key=f"created:{occ.id}", message_type="CLASS_INVITE", scheduled_start_at=occ.actual_start_at,
+            available_at=now, status="PENDING"))
+    await db.flush()
+    return len(recipients)
 
 
 async def sync_reminder_schedules_for_occurrence(db, occurrence_id, new_start_at, schedule_version=1, current_time=None):
@@ -143,7 +175,7 @@ async def backfill_reminders(db, now, organization_id=None):
     rows = (await db.scalars(select(ClassOccurrence).join(Session, Session.id == ClassOccurrence.session_id).where(
         ClassOccurrence.actual_start_at > now, ClassOccurrence.actual_start_at <= now + timedelta(days=7),
         *([ClassOccurrence.organization_id == organization_id] if organization_id else []),
-        ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED"]), Session.is_active.is_(True), Session.deleted_at.is_(None),
+        ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED"]), or_(Session.is_active.is_(True), Session.session_type == "ONE_TO_ONE"), Session.deleted_at.is_(None),
         ~select(ClassReminderSchedule.id).where(ClassReminderSchedule.class_occurrence_id == ClassOccurrence.id,
             ClassReminderSchedule.reminder_type == "REMINDER_30M", ClassReminderSchedule.status != "SUPERSEDED").exists()
     ).order_by(ClassOccurrence.actual_start_at).limit(100).with_for_update(skip_locked=True, of=ClassOccurrence))).all()
@@ -165,7 +197,7 @@ async def dispatch_pending_reminders(db, as_of_time=None, occurrence_id=None, or
     for job in jobs:
         occ = await db.scalar(select(ClassOccurrence).where(ClassOccurrence.id == job.class_occurrence_id).with_for_update())
         session = await db.get(Session, occ.session_id) if occ else None
-        if not occ or not session or occ.status == "CANCELLED" or not session.is_active or session.deleted_at:
+        if not occ or not session or occ.status == "CANCELLED" or (not session.is_active and session.session_type != "ONE_TO_ONE") or session.deleted_at:
             job.status = "CANCELLED"
         elif job.reminder_type != "REMINDER_30M":
             job.status = "SUPERSEDED"
@@ -210,12 +242,12 @@ async def render_meeting_email(db, occ, user, kind, reason=None):
     subject = f"{titles[kind]}: {session.name} — {org.name}"
     body = f"Hello {user.full_name},\n\n{titles[kind]}\n\nClass: {session.name}\nStudio: {org.name}\nStart: {start}\nEnd: {end}\n"
     if kind == "CLASS_CORRECTION":
-        body += f"Status: {'Active' if session.is_active else 'Paused — do not attend until the studio resumes this class'}\n"
+        body += f"Status: {'Assigned appointment' if session.session_type == 'ONE_TO_ONE' else 'Active' if session.is_active else 'Paused — do not attend until the studio resumes this class'}\n"
     if kind == "REMINDER_30M":
         body += "\nYour class starts soon. This reminder is scheduled 30 minutes before class.\n"
     if reason:
         body += f"\n{reason}\n"
-    if kind != "CLASS_CANCELLATION" and session.is_active:
+    if kind != "CLASS_CANCELLATION" and (session.is_active or session.session_type == "ONE_TO_ONE"):
         # Role-aware authenticated access links never include private Zoom host credentials.
         query = urlencode({"studio": str(org.id)})
         body += f"\nOpen your class and join: {settings.WEBSITE_PUBLIC_ORIGIN.rstrip('/')}/meetings/{occ.id}?{query}\n"
@@ -227,7 +259,7 @@ async def request_meeting_invites(db, occ, recipient_id=None):
     from fastapi import HTTPException
     now = datetime.now(timezone.utc)
     session = await db.get(Session, occ.session_id)
-    if occ.status == "CANCELLED" or not session or not session.is_active or session.deleted_at or ensure_utc(occ.actual_end_at) <= now:
+    if occ.status == "CANCELLED" or not session or (not session.is_active and session.session_type != "ONE_TO_ONE") or session.deleted_at or ensure_utc(occ.actual_end_at) <= now:
         raise HTTPException(409, "Invitations can only be sent for an active, unfinished class")
     recipients = await recipients_for(db, occ)
     if recipient_id and recipient_id not in {user.id for user in recipients}:
@@ -235,6 +267,11 @@ async def request_meeting_invites(db, occ, recipient_id=None):
     channels = await db.scalar(select(PlatformCommunicationSetting).limit(1))
     if channels and not channels.email_enabled:
         raise HTTPException(409, "Email notifications are currently paused")
+    opted_out = set((await db.scalars(select(UserCommunicationPreference.user_id).where(
+        UserCommunicationPreference.user_id.in_([u.id for u in recipients if not recipient_id or u.id == recipient_id]),
+        UserCommunicationPreference.email_opted_out.is_(True)))).all())
+    if not any(u.id not in opted_out for u in recipients if not recipient_id or u.id == recipient_id):
+        raise HTTPException(409, "No recipients have class email enabled. Check recipient notification preferences before retrying.")
     from app.modules.zoom.meetings import host_for_occurrence
     from app.modules.communication.zoom_mail import SEND_SCOPES
     conn = await host_for_occurrence(db, occ)
@@ -248,11 +285,11 @@ async def request_meeting_invites(db, occ, recipient_id=None):
         recent = recent.where(MeetingEmailDelivery.recipient_user_id == recipient_id)
     existing = (await db.scalars(recent)).all()
     addressed = {row.recipient_user_id for row in existing}
-    intended = {user.id for user in recipients if not recipient_id or user.id == recipient_id}
+    intended = {user.id for user in recipients if user.id not in opted_out and (not recipient_id or user.id == recipient_id)}
     if intended and intended.issubset(addressed):
         return {"status": "QUEUED", "recipients": len(intended), "message": "An invitation was already requested. Check your email shortly."}
     count = await queue_meeting_email(db, occ, "CLASS_INVITE", f"invite:{occ.id}:{uuid.uuid4()}",
-        recipient_id=recipient_id, exclude_recipient_ids=addressed)
+        recipient_id=recipient_id, exclude_recipient_ids=addressed | opted_out)
     if not count:
         raise HTTPException(409, "No eligible recipients have an email address")
     await db.commit()

@@ -311,7 +311,7 @@ async def test_sandbox_payment_acceptance_flow(client, db_session, monkeypatch):
     assert cancel_data["credit_preserved"] is True
     assert "refunded" not in cancel_data
     assert "No payment is returned" in cancel_data["message"]
-    assert "session credit remains available" in cancel_data["message"]
+    assert "unused session remains available" in cancel_data["message"]
 
     # Verify occurrence3 is no longer in student's upcoming classes (it is EXCUSED)
     upcoming_after_cancel = (await client.get("/student/upcoming-classes", headers=student_auth)).json()

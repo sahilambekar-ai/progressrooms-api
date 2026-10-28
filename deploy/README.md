@@ -239,7 +239,9 @@ Reconnecting a host may require reconciling existing meetings under the existing
 Zoom connection-version policy. No meeting mail falls back to Brevo. The permission is optional for meeting hosting,
 but invitations fail clearly without it. Development Zoom sends are SIMULATED.
 
-The queue rechecks class status, time, enrollment validity/credits, teacher
+New private appointments, newly generated timetable occurrences, and purchases covering upcoming classes queue initial invitations. Scheduled one-on-one appointments remain available to their assigned student independently of catalog Live status.
+
+The queue rechecks class status, time, enrollment validity and purchased session allowances, teacher
 assignment, opt-outs and platform email settings just before sending. Each email
 has one recipient; no student address lists are exposed. Invitation links return
 to an authenticated class-joining page and never contain a private host start URL.
@@ -248,7 +250,11 @@ only the requesting student's own invitation. Repeated requests within one minut
 reuse the request. Provider-confirmed sends are SENT; HTTP 429 is retried up to five
 attempts. Network/5xx uncertainty and abandoned SENDING claims become UNCERTAIN and
 are not automatically resent; inspect Zoom sent mail before manually retrying.
-Email activity includes provider failures and simulation status.
+Email activity includes provider failures and simulation status. Class tables show delivery counts, and manual invitations report an error when all recipients have opted out.
+
+Validation seed accounts use synthetic `@example.com` addresses and are deliberately created with `email_opted_out=True`. Successful Zoom authorization does not change that setting. Use a real, authorized test recipient with email enabled when verifying delivery. Keep synthetic seed recipients opted out. Platform email being enabled does not override recipient preferences. Worker logs distinguish a platform pause from a recipient opt-out.
+
+Local API startup does not start the meeting-email worker. Run the worker separately with the same environment and database after confirming the Zoom mailbox, permissions, recipient and pending queue. Local mocked regression tests report SIMULATED delivery and do not prove that a Zoom mailbox can send live email.
 
 Brevo remains responsible for OTP and purchase/payment notifications, with actual
 provider responses recorded. Meeting mail uses Zoom's RFC 2822/base64url Mail API:
@@ -289,3 +295,18 @@ backup schedule is enabled by this source change.
 See [runtime/privacy operations](RUNTIME_PRIVACY_OPERATIONS.md) for financial-key
 configuration and legacy encryption, consent attestations, request/retention
 limits, readiness, redacted logs and post-migration failure recovery.
+
+
+### Two real test accounts with dated class data
+
+`python -m app.real_account_fixture` is an explicit CLI for local development and UAT only. It creates or validates one solo studio teacher and one student, enables email for only those two recipients, and adds a complimentary course plus private appointments. Seven occurrences cover today, tomorrow and three past dates in the studio timezone, with attendance history. It performs no Zoom provisioning, email sending or payment calls. Existing account passwords, other users, subscriptions and Zoom grants are preserved.
+
+```bash
+APP_ENV=development python -m app.real_account_fixture \
+  --environment local \
+  --teacher-email teacher@example.com \
+  --student-email student@example.com \
+  --credentials-path private-validation/solo-fixture-local.json
+```
+
+For UAT, run with `--environment uat` inside the UAT API container (`APP_ENV=uat`) and use a private path in its persistent `/app/data` volume. The CLI rejects production and remote databases under `--environment local`. New passwords are written only to the mode-0600 credentials file; existing passwords are never reset. Repeating the same run does not duplicate the fixture. Do not commit or publish the credentials file. Sample occurrences are application class records; actual Zoom links require that studio's authorized host.

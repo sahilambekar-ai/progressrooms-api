@@ -45,9 +45,11 @@ async def deliver_one(db, delivery_id):
     try:
         if not user or not user.is_active or not occ or not session:
             row.status, failure = "SUPPRESSED", "Recipient or class is unavailable"
-        elif not channels.email_enabled or (pref and pref.email_opted_out):
-            row.status, failure = "SUPPRESSED", "Email disabled or recipient opted out"
-        elif row.message_type != "CLASS_CANCELLATION" and (occ.status == "CANCELLED" or (not session.is_active and row.message_type != "CLASS_CORRECTION") or session.deleted_at):
+        elif not channels.email_enabled:
+            row.status, failure = "SUPPRESSED", "Operational email is disabled at the platform level"
+        elif pref and pref.email_opted_out:
+            row.status, failure = "SUPPRESSED", "Recipient has opted out of email notifications"
+        elif row.message_type != "CLASS_CANCELLATION" and (occ.status == "CANCELLED" or (not session.is_active and session.session_type != "ONE_TO_ONE" and row.message_type != "CLASS_CORRECTION") or session.deleted_at):
             row.status, failure = "CANCELLED", "Class is cancelled or inactive"
         elif row.message_type in {"REMINDER_30M", "CLASS_INVITE"} and ensure_utc(occ.actual_start_at) != ensure_utc(row.scheduled_start_at):
             row.status, failure = "SUPERSEDED", "Class was rescheduled"
@@ -55,7 +57,7 @@ async def deliver_one(db, delivery_id):
             row.status, failure = "EXPIRED", "Class has ended"
         elif row.message_type == "REMINDER_30M" and ensure_utc(occ.actual_start_at) <= now:
             row.status, failure = "EXPIRED", "Class has already started"
-        elif user.id not in {u.id for u in await recipients_for(db, occ)}:
+        elif row.message_type != "CLASS_CANCELLATION" and user.id not in {u.id for u in await recipients_for(db, occ)}:
             row.status, failure = "SUPPRESSED", "Enrollment or teacher assignment is no longer eligible"
         else:
             from app.modules.billing.saas import operational_access
