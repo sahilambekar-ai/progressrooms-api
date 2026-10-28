@@ -139,23 +139,33 @@ async def create_attempt(db, member, user, kind, expected_email=None, expected_h
     return state, attempt
 
 
-async def validate_attempt(db, state, user, kind):
+async def validate_attempt(db, state, user, kind, *, restart=False):
     row = await db.scalar(select(ZoomOAuthAttempt).where(ZoomOAuthAttempt.state_hash == digest(state)).with_for_update())
-    if not row or row.kind != kind or row.consumed_at or ensure_utc(row.expires_at) <= now():
+    if not row or row.kind != kind or (not restart and (row.consumed_at or ensure_utc(row.expires_at) <= now())):
         raise HTTPException(400, "Authorization link expired or already used; request a new link")
     if row.intended_user_id != user.id:
         raise HTTPException(403, "Sign in as the teacher named in this authorization request")
-    await authorize_member(db, row.organization_id, row.member_id, user, self_only=row.kind == "REQUEST")
+    await authorize_member(db, row.organization_id, row.member_id, user, self_only=restart or row.kind == "REQUEST")
     initiator = await db.scalar(select(OrganizationMember).where(OrganizationMember.organization_id == row.organization_id,
         OrganizationMember.user_id == row.actor_id, OrganizationMember.is_active.is_(True)))
     if not initiator or (row.kind == "REQUEST" and initiator.role != "STUDIO"):
         raise HTTPException(403, "The request initiator no longer has studio access")
-    if row.mode != mode():
+    if not restart and row.mode != mode():
         raise HTTPException(409, "Zoom environment changed; start authorization again")
     conn = await connection_for(db, row.member_id)
-    if (conn.version if conn else 0) != row.connection_version:
+    if not restart and (conn.version if conn else 0) != row.connection_version:
         raise HTTPException(409, "Zoom connection changed; start authorization again")
     return row
+
+
+async def restart_authorization(db, state, user, kind):
+    # Re-check current consent and membership; never reuse a provider code or grant.
+    previous = await validate_attempt(db, state, user, kind, restart=True)
+    member = await db.get(OrganizationMember, previous.member_id)
+    previous.consumed_at, previous.candidate_enc = now(), None
+    fresh_state, attempt = await create_attempt(db, member, user, "OAUTH",
+        expected_email=previous.expected_email, expected_host_id=previous.expected_host_id)
+    return {"authorization_url": ZoomProvider().authorize_url(fresh_state), "is_simulated": attempt.mode == "mock"}
 
 
 async def callback(db, state, code, user):

@@ -44,7 +44,8 @@ async def get_my_enrollments(
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(SessionEnrollment).options(
-        selectinload(SessionEnrollment.session).selectinload(Session.organization)
+        selectinload(SessionEnrollment.session).selectinload(Session.organization),
+        selectinload(SessionEnrollment.session).selectinload(Session.pricing)
     ).where(
         SessionEnrollment.user_id == current_user.id
     ).order_by(SessionEnrollment.created_at.desc())
@@ -82,6 +83,7 @@ async def get_my_enrollments(
 
     return [
         {
+            "is_private_appointment": bool(not e.purchase_order_id and e.session and e.session.session_type == "ONE_TO_ONE" and e.session.pricing and e.session.pricing.pricing_type == "PER_SESSION"),
             "purchase_id": str(e.purchase_order_id) if e.purchase_order_id else None,
             "purchase_name": e.billing_label,
             "amount_paid": float(e.billing_value) if e.billing_value is not None else None,
@@ -134,7 +136,7 @@ async def get_my_upcoming_classes(
         ClassOccurrence.id.not_in(excused_occ_ids),
         ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED", "IN_PROGRESS"]),
         ClassOccurrence.session_id.in_(select(Session.id).join(Organization).where(
-            Session.is_active == True, Session.deleted_at.is_(None),
+            or_(Session.is_active.is_(True), Session.session_type == "ONE_TO_ONE"), Session.deleted_at.is_(None),
             Organization.status == "ACTIVE", Organization.deleted_at.is_(None))),
         ClassOccurrence.actual_end_at > now,
         ClassOccurrence.actual_start_at <= future
@@ -177,13 +179,13 @@ async def get_class_meeting_url(
     ).where(ClassOccurrence.id == occurrence_id)
     occ_res = await db.execute(occ_stmt)
     occ = occ_res.scalar_one_or_none()
-    if not occ or not occ.session or ((not occ.session.is_active or occ.session.deleted_at) and occ.status != "COMPLETED"):
+    if not occ or not occ.session or ((occ.session.deleted_at or (not occ.session.is_active and occ.session.session_type != "ONE_TO_ONE")) and occ.status != "COMPLETED"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class occurrence not found")
 
     from app.common.dates import ensure_utc
     now = datetime.now(timezone.utc)
     historical = ensure_utc(occ.actual_end_at) < now
-    access_at = ensure_utc(occ.actual_start_at) if historical else now
+    access_at = ensure_utc(occ.actual_start_at)
     enr_stmt = select(SessionEnrollment).where(
         SessionEnrollment.session_id == occ.session_id,
         SessionEnrollment.organization_id == occ.organization_id,
@@ -200,7 +202,7 @@ async def get_class_meeting_url(
             enr = candidate
             break
     if not enr:
-        raise HTTPException(403, "You do not have an eligible enrollment or available credits for this class.")
+        raise HTTPException(403, "You need an assigned appointment or a valid pass or course with sessions remaining to join this class.")
     if occ.status == "CANCELLED":
         raise HTTPException(403, "This class is cancelled.")
 
@@ -219,6 +221,10 @@ async def get_class_meeting_url(
         }
     except ZoomAuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    except HTTPException as exc:
+        if exc.status_code in {409, 422, 503}:
+            raise HTTPException(exc.status_code, "The studio's Zoom host is not ready for this class. Please contact the studio; students do not need to connect Zoom.") from exc
+        raise
 
 @router.post("/classes/{occurrence_id}/cancel")
 async def cancel_student_class_booking(
@@ -278,7 +284,7 @@ async def cancel_student_class_booking(
 
     await db.commit()
     return {
-        "message": "Class booking cancelled successfully. Your session credit remains available on your pass. No payment is returned.",
+        "message": "Class booking cancelled successfully. Your unused session remains available on your pass. No payment is returned.",
         "credit_preserved": True,
         "remaining_credits": max(0, (enr.total_sessions or 0) - enr.sessions_attended) if enr.total_sessions else None
     }
@@ -493,6 +499,8 @@ async def get_my_attendance(
         .where(
             ClassOccurrence.actual_start_at >= start,
             ClassOccurrence.actual_start_at < end,
+            (Session.deleted_at.is_(None) | (ClassOccurrence.status == "COMPLETED")),
+            ((SessionEnrollment.status != "CANCELLED") | AttendanceRecord.id.is_not(None)),
             ClassOccurrence.actual_start_at >= SessionEnrollment.valid_from,
             (SessionEnrollment.valid_until.is_(None) | (ClassOccurrence.actual_start_at <= SessionEnrollment.valid_until))
         )

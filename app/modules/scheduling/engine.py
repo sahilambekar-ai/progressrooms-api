@@ -57,6 +57,7 @@ class SchedulingEngine:
         except HTTPException:
             pass
         created_count = 0
+        created_occurrences = []
 
         for rule in session.schedule_rules:
             if not rule.is_active:
@@ -119,10 +120,13 @@ class SchedulingEngine:
                             occurrence_id=occ.id,
                             new_start_at=start_dt
                         )
+                        created_occurrences.append(occ)
                         created_count += 1
 
                 current_date += timedelta(days=1)
 
+        from app.modules.communication.reminder_engine import queue_generated_invites
+        await queue_generated_invites(db, created_occurrences)
         await db.commit()
         return created_count
 

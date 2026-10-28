@@ -7,7 +7,7 @@ import httpx
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.session import Session
+from app.models.session import Session, SessionPricing
 from app.models.organization import Organization, OrganizationStudent
 from app.models.membership_tier import MembershipTier, MembershipTierClass
 from app.models.commerce import Order, OrderItem, Payment, SessionEnrollment
@@ -54,11 +54,13 @@ class CommerceService:
                 )
             )
             if existing_pass:
-                raise ValueError("You already have active access to this pass. You can use your remaining credits on your dashboard.")
+                raise ValueError("You already have active access to this pass. You can use your remaining pass sessions on your dashboard.")
         else:
             offering = await db.scalar(select(Session).join(Organization).options(selectinload(Session.pricing)).where(
                 Session.id == session_id, Session.is_active == True, Session.is_public == True,
                 Session.deleted_at.is_(None), Organization.status == 'ACTIVE', Organization.deleted_at.is_(None)))
+            if offering and offering.session_type == "ONE_TO_ONE" and offering.pricing and offering.pricing.pricing_type == "PER_SESSION":
+                raise ValueError("Private appointments are assigned by the studio")
             if not offering or not offering.pricing:
                 raise ValueError('This class is no longer available')
             sessions, pricing, kind = [offering], offering.pricing, offering.pricing.pricing_type
@@ -169,10 +171,27 @@ class CommerceService:
         await db.execute(insert(OrganizationStudent).values(organization_id=order.organization_id,
             user_id=order.user_id, status='ACTIVE').on_conflict_do_nothing(index_elements=['organization_id', 'user_id']))
         await db.flush()
+        from app.models.schedule import ClassOccurrence
+        from app.modules.communication.reminder_engine import queue_meeting_email
+        for item in items:
+            occurrences = (await db.scalars(select(ClassOccurrence).where(
+                ClassOccurrence.session_id == item.session_id,
+                ClassOccurrence.actual_start_at >= now,
+                ClassOccurrence.actual_start_at < now + timedelta(days=days),
+                ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED"])).with_for_update())).all()
+            for occurrence in occurrences:
+                await queue_meeting_email(db, occurrence, "CLASS_INVITE", f"enrolled:{order.id}:{occurrence.id}", recipient_id=order.user_id)
         return first
 
 
 async def available_credit(db, enrollment, *, lock_pass=True):
+    # Direct private appointments are studio assignments, not a purchased allowance.
+    if enrollment.purchase_order_id is None:
+        appointment = await db.scalar(select(Session.id).join(SessionPricing).where(
+            Session.id == enrollment.session_id, Session.session_type == "ONE_TO_ONE",
+            SessionPricing.pricing_type == "PER_SESSION", SessionPricing.total_classes == 1))
+        if appointment:
+            return True
     if enrollment.total_sessions is None:
         return True
     used = enrollment.sessions_attended

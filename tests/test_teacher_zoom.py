@@ -515,3 +515,57 @@ async def test_owner_and_student_access_without_time_window(db_session, studio, 
     await db_session.commit()
     with pytest.raises(HTTPException):
         await create_join_link(org.id, occ.id, (org, om), db_session)
+
+
+@pytest.mark.asyncio
+async def test_restart_expired_zoom_authorization_preserves_identity_and_consent(db_session, studio):
+    org, owner, teacher, om, tm = studio
+    state, old = await svc.create_attempt(db_session, tm, teacher, 'OAUTH', expected_email='teacher@example.test', expected_host_id='host-123')
+    old.expires_at = svc.now() - timedelta(seconds=1)
+    await db_session.commit()
+    with pytest.raises(HTTPException) as denied:
+        await svc.restart_authorization(db_session, state, owner, 'OAUTH')
+    assert denied.value.status_code == 403
+    data = await svc.restart_authorization(db_session, state, teacher, 'OAUTH')
+    fresh_state = parse_qs(urlparse(data['authorization_url']).query)['state'][0]
+    assert fresh_state != state
+    fresh = await svc.validate_attempt(db_session, fresh_state, teacher, 'OAUTH')
+    assert fresh.expected_email == 'teacher@example.test'
+    assert fresh.expected_host_id == 'host-123'
+    assert old.consumed_at is not None
+    with pytest.raises(HTTPException):
+        await svc.callback(db_session, state, 'old-code', teacher)
+    tm.is_active = False
+    await db_session.commit()
+    with pytest.raises(HTTPException):
+        await svc.restart_authorization(db_session, fresh_state, teacher, 'OAUTH')
+
+
+@pytest.mark.asyncio
+async def test_restart_consumed_callback_requires_fresh_exchange(db_session, studio):
+    org, owner, teacher, om, tm = studio
+    data = await connect(org.id, tm.id, teacher, db_session)
+    query = parse_qs(urlparse(data['authorization_url']).query)
+    candidate = await svc.callback(db_session, query['state'][0], query['code'][0], teacher)
+    fresh = await svc.restart_authorization(db_session, query['state'][0], teacher, 'OAUTH')
+    assert parse_qs(urlparse(fresh['authorization_url']).query)['state'][0] != query['state'][0]
+    with pytest.raises(HTTPException):
+        await svc.confirm(db_session, uuid.UUID(candidate['confirmation_id']), teacher)
+    assert await svc.connection_for(db_session, tm.id) is None
+
+
+@pytest.mark.asyncio
+async def test_restart_expired_teacher_request_and_owner_reconfirmation(db_session, studio):
+    org, owner, teacher, om, tm = studio
+    state, request = await svc.create_attempt(db_session, tm, owner, 'REQUEST')
+    request.expires_at = svc.now() - timedelta(seconds=1)
+    await db_session.commit()
+    result = await svc.restart_authorization(db_session, state, teacher, 'REQUEST')
+    fresh_state = parse_qs(urlparse(result['authorization_url']).query)['state'][0]
+    fresh = await svc.validate_attempt(db_session, fresh_state, teacher, 'OAUTH')
+    assert fresh.intended_user_id == teacher.id and fresh.member_id == tm.id
+    # Connecting on behalf of another teacher must return to the password prompt.
+    owner_state, _ = await svc.create_attempt(db_session, tm, owner, 'OAUTH')
+    with pytest.raises(HTTPException) as denied:
+        await svc.restart_authorization(db_session, owner_state, owner, 'OAUTH')
+    assert denied.value.status_code == 403

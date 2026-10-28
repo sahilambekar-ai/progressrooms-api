@@ -3,7 +3,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 import secrets
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
@@ -47,8 +47,8 @@ async def delete_session(
 
     now = datetime.now(timezone.utc)
     future = (await db.scalars(select(ClassOccurrence).where(ClassOccurrence.session_id == class_id,
-        ClassOccurrence.organization_id == org_id, ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED"]),
-        ClassOccurrence.actual_start_at >= now).with_for_update())).all()
+        ClassOccurrence.organization_id == org_id, ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED", "IN_PROGRESS"]),
+        ClassOccurrence.actual_end_at > now).with_for_update())).all()
     # Remote deletes are idempotent; a provider outage keeps the local batch intact for retry.
     for occurrence in future:
         await synchronize(db, occurrence, "cancel")
@@ -118,6 +118,14 @@ async def list_sessions(
         stmt = stmt.order_by(Session.deleted_at.desc())
     res = await db.execute(stmt)
     sessions = res.scalars().all()
+    appointment_ids = [s.id for s in sessions if s.session_type == "ONE_TO_ONE" and s.pricing and s.pricing.pricing_type == "PER_SESSION"]
+    assignments = {}
+    if appointment_ids:
+        rows = (await db.execute(select(SessionEnrollment.session_id, User.id, User.full_name, User.email)
+            .join(User, User.id == SessionEnrollment.user_id).where(SessionEnrollment.session_id.in_(appointment_ids),
+                SessionEnrollment.organization_id == org_id, SessionEnrollment.status == "ACTIVE"))).all()
+        for session_id, user_id, full_name, email in rows:
+            assignments.setdefault(session_id, {"id": str(user_id), "name": full_name, "email": email})
 
     return [
         {
@@ -166,6 +174,8 @@ async def list_sessions(
                 }
                 for r in s.schedule_rules if r.is_active or history
             ],
+            "assigned_student": assignments.get(s.id),
+            "assigned_student_user_id": assignments.get(s.id, {}).get("id"),
             "occurrences": [
                 {
                     "id": str(o.id),
@@ -188,6 +198,8 @@ async def create_one_on_one_class(
     db: AsyncSession = Depends(get_db)
 ):
     org, _ = tenant
+    from app.modules.zoom.service import lock_studio
+    await lock_studio(db, org_id)
 
     # Verify teacher belongs to this studio and is active
     teacher = await db.scalar(
@@ -226,6 +238,9 @@ async def create_one_on_one_class(
         User.is_active.is_(True), User.account_status == "ACTIVE", User.deleted_at.is_(None)))
     if not eligible_student:
         raise HTTPException(422, "Choose an active, verified student")
+
+    if not student_member:
+        db.add(OrganizationStudent(organization_id=org_id, user_id=actual_student_user_id, status="ACTIVE"))
 
     # Find or create a 1-on-1 ClassType
     class_type = await db.scalar(
@@ -290,7 +305,9 @@ async def create_one_on_one_class(
         price=payload.offer_price if payload.offer_price is not None else payload.price,
         currency="INR",
         total_classes=1,
-        validity_days=7
+        validity_days=7,
+        packages=[{"id": str(uuid.uuid4()), "total_classes": 1, "price": float(payload.price),
+                   "offer_price": float(payload.offer_price) if payload.offer_price is not None else None, "validity_days": 7}]
     )
     db.add(pricing)
 
@@ -360,6 +377,11 @@ async def create_one_on_one_class(
         session.deleted_at = now_utc
         session.is_active = False
 
+    if not is_already_ended:
+        from app.modules.communication.reminder_engine import sync_reminder_schedules_for_occurrence, queue_meeting_email
+        await sync_reminder_schedules_for_occurrence(db, occ.id, start_dt)
+        await queue_meeting_email(db, occ, "CLASS_INVITE", f"created:{occ.id}")
+
     await db.commit()
     await db.refresh(session)
 
@@ -373,6 +395,81 @@ async def create_one_on_one_class(
         "is_completed": is_already_ended,
         "message": "1-on-1 Class scheduled successfully"
     }
+
+@router.put("/one-on-one-classes/{class_id}")
+async def update_one_on_one_class(
+    org_id: uuid.UUID, class_id: uuid.UUID, payload: OneOnOneSessionCreate,
+    tenant=Depends(require_org_role([UserRole.OWNER, UserRole.ADMIN])),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.common.dates import ensure_utc
+    from app.modules.zoom.service import lock_studio
+    from app.modules.zoom.meetings import synchronize
+    from app.modules.communication.reminder_engine import record_class_edit, queue_meeting_email
+    await lock_studio(db, org_id)
+    session = await db.scalar(select(Session).options(selectinload(Session.pricing)).where(
+        Session.id == class_id, Session.organization_id == org_id, Session.deleted_at.is_(None)).with_for_update())
+    if not session or session.session_type != "ONE_TO_ONE" or not session.pricing or session.pricing.pricing_type != "PER_SESSION":
+        raise HTTPException(404, "Scheduled one-on-one class not found")
+    occurrences = (await db.scalars(select(ClassOccurrence).where(ClassOccurrence.session_id == class_id).with_for_update())).all()
+    if len(occurrences) != 1:
+        raise HTTPException(409, "Use the batch editor for a reusable session package")
+    occ = occurrences[0]
+    now = datetime.now(timezone.utc)
+    if occ.status not in {"SCHEDULED", "RESCHEDULED"} or ensure_utc(occ.actual_start_at) <= now:
+        raise HTTPException(409, "Only an upcoming one-on-one class can be edited")
+    teacher = await db.scalar(select(OrganizationMember).where(OrganizationMember.id == payload.teacher_member_id,
+        OrganizationMember.organization_id == org_id, OrganizationMember.is_active.is_(True), OrganizationMember.can_teach.is_(True)))
+    if not teacher:
+        raise HTTPException(422, "Choose an active teacher of this studio")
+    student = await db.scalar(select(User).where(User.id == payload.student_user_id, User.role == "STUDENT",
+        User.is_active.is_(True), User.is_verified.is_(True), User.account_status == "ACTIVE", User.deleted_at.is_(None)))
+    if not student:
+        raise HTTPException(422, "Choose an active, verified student")
+    zone = ZoneInfo(tenant[0].timezone or "Asia/Kolkata")
+    start = datetime.combine(payload.date, time.fromisoformat(payload.start_time), zone).astimezone(timezone.utc)
+    end = datetime.combine(payload.date, time.fromisoformat(payload.end_time), zone).astimezone(timezone.utc)
+    if start <= now:
+        raise HTTPException(422, "Choose a future start time")
+    if await SchedulingEngine.check_instructor_conflict(db, teacher.id, start, end, exclude_occurrence_id=occ.id):
+        raise HTTPException(409, "Teacher has a scheduling conflict during this time slot")
+    if occ.zoom_connection_id and occ.instructor_id != teacher.id:
+        raise HTTPException(409, "Reconcile the existing Zoom host in Zoom Settings before changing this teacher")
+    old_start = occ.actual_start_at
+    if occ.provider_meeting_id:
+        await synchronize(db, occ, "reschedule", start=start, end=end, topic=payload.title)
+    if ensure_utc(old_start) != start or ensure_utc(occ.actual_end_at) != end:
+        occ.status = "RESCHEDULED"
+    session.name, session.full_description = payload.title, payload.full_description
+    session.duration_minutes = int((end - start).total_seconds() / 60)
+    session.is_public, session.capacity = False, 1
+    session.pricing.price = payload.offer_price if payload.offer_price is not None else payload.price
+    option_id = (session.pricing.packages or [{}])[0].get("id", str(uuid.uuid4()))
+    session.pricing.packages = [{"id": option_id, "total_classes": 1, "price": float(payload.price),
+        "offer_price": float(payload.offer_price) if payload.offer_price is not None else None, "validity_days": 7}]
+    await db.execute(delete(SessionInstructor).where(SessionInstructor.session_id == class_id))
+    db.add(SessionInstructor(session_id=class_id, member_id=teacher.id, role="PRIMARY"))
+    enrollments = (await db.scalars(select(SessionEnrollment).where(SessionEnrollment.session_id == class_id))).all()
+    assigned = next((e for e in enrollments if e.user_id == student.id), None)
+    for enrollment in enrollments:
+        if enrollment is not assigned:
+            if enrollment.status == "ACTIVE":
+                await queue_meeting_email(db, occ, "CLASS_CANCELLATION", f"unassigned:{occ.id}:{uuid.uuid4()}",
+                    recipient_id=enrollment.user_id, reason="Your assignment to this private appointment was cancelled by the studio.")
+            enrollment.status = "CANCELLED"
+    if not await db.scalar(select(OrganizationStudent.id).where(OrganizationStudent.organization_id == org_id, OrganizationStudent.user_id == student.id)):
+        db.add(OrganizationStudent(organization_id=org_id, user_id=student.id, status="ACTIVE"))
+    if assigned is None:
+        assigned = SessionEnrollment(organization_id=org_id, session_id=class_id, user_id=student.id, total_sessions=1, sessions_attended=0)
+        db.add(assigned)
+    occ.instructor_id, occ.actual_start_at, occ.actual_end_at = teacher.id, start, end
+    assigned.status, assigned.valid_from, assigned.valid_until = "ACTIVE", start, end + timedelta(days=1)
+    assigned.billing_value, assigned.billing_currency, assigned.billing_type, assigned.billing_label = session.pricing.price, "INR", "PER_SESSION", session.name
+    await db.flush()
+    await record_class_edit(db, occ.id, {"actual_start_at": start, "actual_end_at": end, "instructor_id": teacher.id, "name": session.name}, {"actual_start_at": old_start})
+    await queue_meeting_email(db, occ, "CLASS_INVITE", f"assigned:{occ.id}:{student.id}:{start.isoformat()}", recipient_id=student.id)
+    await db.commit()
+    return {"id": str(session.id), "occurrence_id": str(occ.id), "message": "One-on-one class updated"}
 
 @router.post("/classes", status_code=status.HTTP_201_CREATED)
 @router.post("/sessions", status_code=status.HTTP_201_CREATED, include_in_schema=False)
@@ -406,7 +503,7 @@ async def create_session(
         duration_minutes=payload.duration_minutes,
         language=payload.language,
         is_active=payload.is_active,
-        is_public=payload.is_public
+        is_public=False if payload.session_type == SessionType.ONE_TO_ONE and payload.pricing.pricing_type == PricingType.PER_SESSION and payload.pricing.total_classes == 1 else payload.is_public
     )
     db.add(session)
     await db.flush()
@@ -488,6 +585,9 @@ async def update_session(
     if not session:
         raise HTTPException(404, "Class not found")
 
+    if session.session_type == "ONE_TO_ONE" and session.pricing and session.pricing.pricing_type == "PER_SESSION" and session.pricing.total_classes == 1:
+        raise HTTPException(409, "Use the one-on-one appointment editor to update this class")
+
     member = tenant[1]
     if member and member.role == "TEACHER":
         if not any(i.member_id == member.id for i in session.instructors):
@@ -520,6 +620,8 @@ async def update_session(
         session.skill_level = payload.skill_level.value
     if payload.session_type is not None:
         session.session_type = payload.session_type.value
+    if session.session_type == "ONE_TO_ONE" and session.pricing and session.pricing.pricing_type == "PER_SESSION" and session.pricing.total_classes == 1:
+        session.is_public = False
     if payload.requirements is not None:
         from app.models.session import SessionRequirement
         if session.requirements:

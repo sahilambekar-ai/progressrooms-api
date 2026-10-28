@@ -50,7 +50,7 @@ async def test_generation_is_bounded_idempotent_and_refreshes_rules(db_session, 
     try:
         count = await SchedulingEngine.generate_occurrences_for_session(db_session, cls.id, 70)
         assert count == 11
-        assert len(statements) == query_budget  # One additional settings read when Zoom is enabled.
+        assert len(statements) == query_budget + 1  # One batched invitation-recipient query for all new occurrences.
         statements.clear()
         assert await SchedulingEngine.generate_occurrences_for_session(db_session, cls.id, 70) == 0
         assert len(statements) == query_budget
