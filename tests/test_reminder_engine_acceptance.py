@@ -305,3 +305,57 @@ async def test_validation_worker_only_processes_its_selected_studio(db_session, 
     expected = set((await db_session.scalars(select(MeetingEmailDelivery.id).where(MeetingEmailDelivery.class_occurrence_id == first.id))).all())
     assert count == len(expected) == 2
     assert set(called) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('changes', [
+    {'short_description': 'Bring a mat'},
+    {'requirements': {'required_equipment': 'Yoga mat'}},
+    {'capacity': 12},
+    {'is_public': False},
+    {'pricing': {'price': 100}},
+])
+async def test_class_edits_queue_change_emails_for_teacher_and_student(db_session, changes):
+    from app.modules.classes.router import update_session
+    from app.modules.classes.schemas import SessionUpdate
+    occ, teacher, student = await make_occurrence(db_session)
+    org = await db_session.get(Organization, occ.organization_id)
+    await update_session(org.id, occ.session_id, SessionUpdate(**changes), (org, None), db_session)
+    change = await db_session.scalar(select(PendingMaterialChange).where(PendingMaterialChange.class_occurrence_id == occ.id))
+    assert set(change.changes_summary) == set(changes)
+    assert await process_debounced_material_corrections(db_session, datetime.now(timezone.utc) + timedelta(minutes=3)) == 2
+    rows = (await db_session.scalars(select(MeetingEmailDelivery))).all()
+    assert {row.recipient_user_id for row in rows} == {teacher.id, student.id}
+    assert all(row.message_type == 'CLASS_CORRECTION' for row in rows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('via_toggle', [True, False])
+async def test_pause_email_is_delivered_without_join_link_and_resume_is_queued(db_session, monkeypatch, via_toggle):
+    from app.modules.classes.router import update_session, toggle_session_status
+    from app.modules.classes.schemas import SessionUpdate, SessionToggleStatus
+    occ, _, student = await make_occurrence(db_session)
+    org = await db_session.get(Organization, occ.organization_id)
+    if via_toggle:
+        await toggle_session_status(org.id, occ.session_id, SessionToggleStatus(is_active=False), (org, None), db_session)
+    else:
+        await update_session(org.id, occ.session_id, SessionUpdate(is_active=False), (org, None), db_session)
+    await process_debounced_material_corrections(db_session, datetime.now(timezone.utc) + timedelta(minutes=3))
+    row = await db_session.scalar(select(MeetingEmailDelivery).where(MeetingEmailDelivery.recipient_user_id == student.id))
+    row.available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    calls = []
+    async def host(*args): return SimpleNamespace(mode='mock')
+    async def send(*args):
+        calls.append(args)
+        return {'id': 'simulated-pause', 'simulated': True}
+    monkeypatch.setattr('app.modules.communication.worker.host_for_occurrence', host)
+    monkeypatch.setattr('app.modules.communication.worker.send_zoom_email', send)
+    await db_session.commit()
+    await deliver_one(db_session, row.id)
+    await db_session.refresh(row)
+    assert row.status == 'SIMULATED'
+    assert len(calls) == 1
+    assert 'Paused' in calls[0][4]
+    assert '/meetings/' not in calls[0][4]
+    await toggle_session_status(org.id, occ.session_id, SessionToggleStatus(is_active=True), (org, None), db_session)
+    assert await process_debounced_material_corrections(db_session, datetime.now(timezone.utc) + timedelta(minutes=3)) == 2

@@ -47,7 +47,7 @@ async def deliver_one(db, delivery_id):
             row.status, failure = "SUPPRESSED", "Recipient or class is unavailable"
         elif not channels.email_enabled or (pref and pref.email_opted_out):
             row.status, failure = "SUPPRESSED", "Email disabled or recipient opted out"
-        elif row.message_type != "CLASS_CANCELLATION" and (occ.status == "CANCELLED" or not session.is_active or session.deleted_at):
+        elif row.message_type != "CLASS_CANCELLATION" and (occ.status == "CANCELLED" or (not session.is_active and row.message_type != "CLASS_CORRECTION") or session.deleted_at):
             row.status, failure = "CANCELLED", "Class is cancelled or inactive"
         elif row.message_type in {"REMINDER_30M", "CLASS_INVITE"} and ensure_utc(occ.actual_start_at) != ensure_utc(row.scheduled_start_at):
             row.status, failure = "SUPERSEDED", "Class was rescheduled"

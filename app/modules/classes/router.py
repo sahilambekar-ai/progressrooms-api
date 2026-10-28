@@ -614,15 +614,8 @@ async def update_session(
             db.add(sr)
         await SchedulingEngine.generate_occurrences_for_session(db, session.id, days_ahead=30)
 
-    changed = payload.model_dump(exclude_unset=True)
-    material = {key: value for key, value in changed.items() if key in {"name", "full_description", "duration_minutes", "instructor_member_ids", "schedule_rules"}}
-    if material:
-        from app.modules.communication.reminder_engine import record_class_edit
-        occurrences = (await db.scalars(select(ClassOccurrence).where(
-            ClassOccurrence.session_id == session.id, ClassOccurrence.actual_end_at > datetime.now(timezone.utc),
-            ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED", "IN_PROGRESS"])).with_for_update())).all()
-        for occurrence in occurrences:
-            await record_class_edit(db, occurrence.id, {"name": session.name}, {})
+    from app.modules.communication.reminder_engine import record_session_edit
+    await record_session_edit(db, session.id, payload.model_dump(exclude_unset=True))
     await db.commit()
     await db.refresh(session)
     return {"id": str(session.id), "name": session.name, "is_active": session.is_active}
@@ -642,10 +635,15 @@ async def toggle_session_status(
     if not session:
         raise HTTPException(404, "Class not found")
 
+    previous_active = session.is_active
     if payload and payload.is_active is not None:
         session.is_active = payload.is_active
     else:
         session.is_active = not session.is_active
+
+    if session.is_active != previous_active:
+        from app.modules.communication.reminder_engine import record_session_edit
+        await record_session_edit(db, session.id, {"is_active": session.is_active})
 
     await db.commit()
     await db.refresh(session)

@@ -14,7 +14,24 @@ from app.models.schedule import ClassOccurrence
 from app.models.commerce import SessionEnrollment
 from app.models.communication import ClassReminderSchedule, PendingMaterialChange, MeetingEmailDelivery, UserCommunicationPreference, PlatformCommunicationSetting
 
-MATERIAL_FIELDS = {"actual_start_at", "actual_end_at", "instructor_id", "meeting_url", "name", "full_description", "duration_minutes"}
+MATERIAL_FIELDS = {"actual_start_at", "actual_end_at", "instructor_id", "meeting_url", "name", "full_description", "duration_minutes",
+    "short_description", "requirements", "is_active", "is_public", "skill_level", "session_type", "capacity",
+    "min_age", "max_age", "pricing", "instructor_member_ids", "schedule_rules"}
+FIELD_LABELS = {"actual_start_at": "start time", "actual_end_at": "end time", "instructor_id": "teacher",
+    "instructor_member_ids": "teachers", "schedule_rules": "timetable", "is_active": "class availability",
+    "is_public": "public visibility", "requirements": "equipment and preparation", "pricing": "pricing and packages"}
+
+
+async def record_session_edit(db, session_id, changed_fields):
+    material = {key: value for key, value in changed_fields.items() if key in MATERIAL_FIELDS}
+    if not material:
+        return
+    await db.flush()
+    occurrences = (await db.scalars(select(ClassOccurrence).where(
+        ClassOccurrence.session_id == session_id, ClassOccurrence.actual_end_at > datetime.now(timezone.utc),
+        ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED", "IN_PROGRESS"])).with_for_update())).all()
+    for occurrence in occurrences:
+        await record_class_edit(db, occurrence.id, material, {})
 
 
 def format_ist_time(dt):
@@ -177,7 +194,7 @@ async def process_debounced_material_corrections(db, as_of_time=None, occurrence
         occ = await db.scalar(select(ClassOccurrence).where(ClassOccurrence.id == change.class_occurrence_id).with_for_update())
         if occ and occ.status != "CANCELLED" and ensure_utc(occ.actual_end_at) > ensure_utc(now):
             count += await queue_meeting_email(db, occ, "CLASS_CORRECTION", f"change:{change.id}",
-                reason="Class details have changed. Please check the latest details below.", current_time=now)
+                reason="Updated: " + ", ".join(FIELD_LABELS.get(key, key.replace("_", " ")) for key in sorted(change.changes_summary)) + ". Please check the latest class details.", current_time=now)
         change.processed = True
     await db.flush()
     return count
@@ -192,11 +209,13 @@ async def render_meeting_email(db, occ, user, kind, reason=None):
     titles = {"REMINDER_30M": "Class reminder", "CLASS_INVITE": "Class invitation", "CLASS_CORRECTION": "Class updated", "CLASS_CANCELLATION": "Class cancelled"}
     subject = f"{titles[kind]}: {session.name} — {org.name}"
     body = f"Hello {user.full_name},\n\n{titles[kind]}\n\nClass: {session.name}\nStudio: {org.name}\nStart: {start}\nEnd: {end}\n"
+    if kind == "CLASS_CORRECTION":
+        body += f"Status: {'Active' if session.is_active else 'Paused — do not attend until the studio resumes this class'}\n"
     if kind == "REMINDER_30M":
         body += "\nYour class starts soon. This reminder is scheduled 30 minutes before class.\n"
     if reason:
         body += f"\n{reason}\n"
-    if kind != "CLASS_CANCELLATION":
+    if kind != "CLASS_CANCELLATION" and session.is_active:
         # Role-aware authenticated access links never include private Zoom host credentials.
         query = urlencode({"studio": str(org.id)})
         body += f"\nOpen your class and join: {settings.WEBSITE_PUBLIC_ORIGIN.rstrip('/')}/meetings/{occ.id}?{query}\n"
