@@ -4,7 +4,7 @@ import sys
 from app.core.database import AsyncSessionLocal
 from app.modules.zoom.service import process_revocations
 
-async def main():
+async def _run():
     while True:
         try:
             async with AsyncSessionLocal() as db:
@@ -15,6 +15,14 @@ async def main():
         if "--once" in sys.argv:
             return
         await asyncio.sleep(60)
+
+async def main():
+    from app.core.database import engine
+    try:
+        await _run()
+    finally:
+        await engine.dispose()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

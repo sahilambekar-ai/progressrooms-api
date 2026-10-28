@@ -292,7 +292,7 @@ async def test_support_ticket_conversation_flow(client: AsyncClient, db_session,
     await db_session.flush()
 
     m_owner = OrganizationMember(organization_id=org.id, user_id=owner.id, role="STUDIO", is_active=True)
-    db_session.add(m_owner)
+    db_session.add_all([m_owner, OrganizationStudent(organization_id=org.id, user_id=student.id)])
     await db_session.commit()
 
     student_h = auth_headers(student)

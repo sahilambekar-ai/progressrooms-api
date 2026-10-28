@@ -5,7 +5,7 @@ import os
 import shutil
 import sqlite3
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -44,7 +44,7 @@ def host_sample():
     return cpu, memory, round(100*disk.used/disk.total, 2), os.getloadavg()[0]
 
 def save_sample(snapshot):
-    with connection() as db:
+    with closing(connection()) as db, db:
         db.execute("INSERT OR REPLACE INTO samples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (int(time.time())//60*60, os.getpid(), *host_sample(), *snapshot))
         db.execute("DELETE FROM samples WHERE ts < ?", (int(time.time())-32*86400,))
@@ -62,12 +62,16 @@ async def collect():
 @asynccontextmanager
 async def lifespan(app):
     task = asyncio.create_task(collect())
-    yield
-    task.cancel()
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        from app.core.database import engine
+        await engine.dispose()
 
 def report(period, tz):
     now = datetime.now(ZoneInfo(tz))
@@ -76,7 +80,7 @@ def report(period, tz):
         start -= timedelta(days=start.weekday())
     elif period == "month":
         start = start.replace(day=1)
-    with connection() as db:
+    with closing(connection()) as db, db:
         rows = db.execute("SELECT ts, MAX(cpu), MAX(memory), MAX(disk), MAX(load), SUM(requests), SUM(errors), SUM(latency) FROM samples WHERE ts >= ? GROUP BY ts ORDER BY ts", (start.timestamp(),)).fetchall()
     # Keep peaks when reducing chart data; gaps stay visible as separate time buckets.
     width = {"day": 300, "week": 1800, "month": 7200}[period]

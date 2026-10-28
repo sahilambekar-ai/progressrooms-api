@@ -44,7 +44,7 @@ async def require_communication_tester(user: User = Depends(get_current_user)) -
     """Allow studio testing only in the explicitly enabled local development environment."""
     if user.role == "SUPER_ADMIN":
         return user
-    if settings.DEV_TEST_LOGIN_ENABLED and user.role == "STUDIO":
+    if settings.development_login_enabled and user.role == "STUDIO":
         return user
     raise HTTPException(status_code=403, detail="Superadmin access required; studio testing is available only in local development")
 
@@ -231,7 +231,7 @@ async def trigger_engine_cycle(
 ):
     """
     Triggers an immediate cycle of the Progress Rooms notification engine:
-    1. Dispatches all due class reminders (REMINDER_2H, REMINDER_15M).
+    1. Queues due 30-minute Zoom Mail class reminders.
     2. Processes any expired 2-minute debounced material schedule corrections.
     3. Evaluates studio subscription billing due dates and stops pending reminders if already paid.
     Returns a structured summary of dispatches and suppressions.
@@ -241,6 +241,7 @@ async def trigger_engine_cycle(
 
     reminders_count = await dispatch_pending_reminders(db=db, as_of_time=now)
     corrections_count = await process_debounced_material_corrections(db=db, as_of_time=now)
+    await db.commit()
     billing_report = await process_billing_reminders(db=db, current_time=now)
 
     return EngineCycleResponse(

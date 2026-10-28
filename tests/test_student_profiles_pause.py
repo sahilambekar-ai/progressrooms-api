@@ -57,7 +57,7 @@ async def roster(db_session):
 async def test_profile_validation_and_tenant_boundaries(client, db_session, roster):
     owner, teacher, student, outsider, record, enrollment, _, _ = roster
     url=f"students/{record.id}"
-    body=dict(full_name="Updated Student", phone="+91 98765 43210", whatsapp_number="+91 91234 56789", address="Studio road", location="Pune", student_notes="Practice note")
+    body=dict(profile_consent_confirmed=True, profile_consent_reference="TEST-CONSENT", full_name="Updated Student", phone="+91 98765 43210", whatsapp_number="+91 91234 56789", address="Studio road", location="Pune", student_notes="Practice note")
     for user in [outsider, student]:
         assert (await client.patch(url, headers=auth(user), json=body)).status_code == 403
     for bad in [{"full_name":"Name"}, {**body,"phone":None}, {**body,"phone":" "}, {**body,"phone":"123"}, {**body,"whatsapp_number":"bad"}, {**body,"full_name":" "}, {**body,"status":"UNKNOWN"}, {**body,"is_verified":False}, {**body,"email":"other@example.com"}]:

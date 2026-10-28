@@ -75,7 +75,7 @@ async def test_communication_settings_rbac(db_session, client, auth_headers, mon
     res_ok = await client.get("/admin/communication/settings", headers=auth_headers(superadmin))
     assert res_ok.status_code == 200
     data = res_ok.json()
-    assert data["whatsapp_enabled"] is True
+    assert data["whatsapp_enabled"] is False
     assert data["email_enabled"] is True
     assert data["scope"] == "Applies to all studios"
     assert "connection_status" in data
@@ -122,10 +122,10 @@ async def test_communication_channel_toggles_and_audit_logging(db_session, clien
     audit_res = await client.get("/admin/communication/audit-logs", headers=auth_headers(superadmin))
     assert audit_res.status_code == 200
     logs = audit_res.json()
-    assert len(logs) >= 2
+    assert len(logs) >= 1
     channels_logged = [l["channel"] for l in logs[:2]]
     assert "EMAIL" in channels_logged
-    assert "WHATSAPP" in channels_logged
+    assert "WHATSAPP" not in channels_logged
 
 
 @pytest.mark.asyncio
@@ -160,10 +160,7 @@ async def test_channel_switch_suppression_and_test_dispatch(db_session, client, 
         json={"channel": "WHATSAPP_ADMIN", "recipient": "+919876543210"},
         headers=auth_headers(superadmin),
     )
-    assert test_wa_res.status_code == 200
-    res_wa_data = test_wa_res.json()
-    assert res_wa_data["status"] == "SUPPRESSED"
-    assert res_wa_data["suppression_reason"] == "Suppressed: whatsapp disabled"
+    assert test_wa_res.status_code == 410
 
     # Provider credentials are explicit so this test does not depend on a local .env.
     from app.core.config import settings
@@ -190,7 +187,7 @@ async def test_channel_switch_suppression_and_test_dispatch(db_session, client, 
     history_res = await client.get("/admin/communication/history", headers=auth_headers(superadmin))
     assert history_res.status_code == 200
     history_data = history_res.json()
-    assert history_data["total_items"] >= 3
+    assert history_data["total_items"] >= 2
     statuses = [item["status"] for item in history_data["items"]]
     assert "SUPPRESSED" in statuses
     assert "SENT" in statuses
@@ -241,7 +238,7 @@ async def test_auth_emails_unaffected_by_operational_toggle(db_session, client, 
     # Restore operational switches back to True
     await client.patch(
         "/admin/communication/settings",
-        json={"email_enabled": True, "whatsapp_enabled": True},
+        json={"email_enabled": True},
         headers=auth_headers(superadmin),
     )
 
@@ -255,9 +252,12 @@ async def test_simulated_tests_do_not_claim_delivery(db_session, client, auth_he
     admin = await get_or_create_superadmin(db_session)
     headers = auth_headers(admin)
     await client.patch("/admin/communication/settings", headers=headers,
-                       json={"email_enabled": True, "whatsapp_enabled": True})
+                       json={"email_enabled": True})
     response = await client.post("/admin/communication/test", headers=headers,
                                  json={"channel": channel, "recipient": "test@example.com" if channel == "EMAIL" else "+919876543210"})
+    if channel != "EMAIL":
+        assert response.status_code == 410
+        return
     assert response.status_code == 200
     assert response.json()["status"] == "SIMULATED"
     assert response.json()["success"] is False
@@ -348,3 +348,10 @@ async def test_test_email_without_provider_key_is_simulated(db_session, client, 
     assert response.json()["status"] == "SIMULATED"
     assert response.json()["success"] is False
     dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_cannot_be_reenabled(db_session, client, auth_headers):
+    admin = await get_or_create_superadmin(db_session)
+    response = await client.patch("/admin/communication/settings", headers=auth_headers(admin), json={"whatsapp_enabled": True})
+    assert response.status_code == 422

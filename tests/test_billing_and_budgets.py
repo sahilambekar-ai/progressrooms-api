@@ -157,7 +157,7 @@ async def test_student_payment_received_notification(db_session):
 
     res = await notify_student_payment_received(db_session, order.id)
     assert res["success"] is True
-    assert res["dispatched"]["whatsapp"] is True
+    assert res["dispatched"]["whatsapp"] is False
     assert res["dispatched"]["email"] is True
 
     # Inspect logs
@@ -168,13 +168,9 @@ async def test_student_payment_received_notification(db_session):
         )
     )).all()
 
-    assert len(logs) == 2
-    wa_log = next(l for l in logs if l.channel == "WHATSAPP_ADMIN")
+    assert len(logs) == 1
+    assert all(l.channel == "EMAIL" for l in logs)
     em_log = next(l for l in logs if l.channel == "EMAIL")
-
-    assert wa_log.status == "SENT"
-    assert "Sattva Sanctuary" in wa_log.body_preview
-    assert "10-Class Prana Pass" in wa_log.body_preview
 
     assert em_log.status == "SENT"
     assert "10-Class Prana Pass" in em_log.subject_or_title
@@ -203,7 +199,7 @@ async def test_studio_subscription_billing_notifications(db_session):
         due_date=due_date
     )
     assert inv_res["success"] is True
-    assert inv_res["dispatches_sent"] == 2  # WhatsApp + Email
+    assert inv_res["dispatches_sent"] == 1  # WhatsApp + Email
 
     # 2. Payment due soon
     due_res = await notify_studio_payment_due_soon(
@@ -214,7 +210,7 @@ async def test_studio_subscription_billing_notifications(db_session):
         due_date=due_date
     )
     assert due_res["success"] is True
-    assert due_res["dispatches_sent"] == 2
+    assert due_res["dispatches_sent"] == 1
 
     # 3. Payment overdue
     overdue_res = await notify_studio_payment_overdue(
@@ -225,7 +221,7 @@ async def test_studio_subscription_billing_notifications(db_session):
         days_overdue=3
     )
     assert overdue_res["success"] is True
-    assert overdue_res["dispatches_sent"] == 2
+    assert overdue_res["dispatches_sent"] == 1
 
     # 4. Payment received
     recv_res = await notify_studio_payment_received(
@@ -235,7 +231,7 @@ async def test_studio_subscription_billing_notifications(db_session):
         payment_reference="pay_sub_oct26"
     )
     assert recv_res["success"] is True
-    assert recv_res["dispatches_sent"] == 2
+    assert recv_res["dispatches_sent"] == 1
 
 
 @pytest.mark.asyncio
@@ -391,3 +387,12 @@ async def test_engine_cycle_and_budgets_api(db_session, client, auth_headers):
     assert "corrections_dispatched" in cycle_data
     assert "billing_summary" in cycle_data
     assert "Engine cycle completed" in cycle_data["details"]
+
+
+@pytest.fixture(autouse=True)
+def billing_transport(monkeypatch):
+    from app.core.config import settings
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "BREVO_ENABLED", True)
+    monkeypatch.setattr("app.modules.communication.service._dispatch_brevo_request", AsyncMock(return_value=(201, {"messageId": "billing-test"}, "")))

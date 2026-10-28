@@ -3,7 +3,9 @@ import random
 import secrets
 import uuid
 from datetime import datetime, timezone
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from app.common.validation import Name, Slug, Currency
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -22,10 +24,19 @@ from app.modules.zoom import service as zoom_accounts
 router = APIRouter(prefix="/organizations", tags=["Organizations"])
 
 class OrganizationCreate(BaseModel):
-    name: str
-    slug: str
+    name: Name
+    slug: Slug
     timezone: str = "Asia/Kolkata"
-    currency: str = "INR"
+    currency: Currency = "INR"
+
+    @field_validator("timezone")
+    @classmethod
+    def known_timezone(cls, value):
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("Choose a valid IANA timezone")
+        return value
 
 class OrganizationUpdate(BaseModel):
     name: str | None = None
@@ -41,7 +52,7 @@ class MemberInvite(BaseModel):
     bio: str | None = None
 
 class StudioProfileUpdate(BaseModel):
-    name: str | None = None
+    name: Name | None = None
     phone: str | None = None
     whatsapp_number: str | None = None
     support_email: str | None = None
@@ -82,8 +93,22 @@ class StudioProfileUpdate(BaseModel):
     zoom_cloud_recording_mode: str | None = None
     zoom_host_key: str | None = None
     account_completed: bool | None = None
-    completion_step: int | None = None
-    completion_percentage: int | None = None
+    completion_step: int | None = Field(default=None, ge=1, le=6)
+    completion_percentage: int | None = Field(default=None, ge=0, le=100)
+
+    @field_validator("*")
+    @classmethod
+    def match_database_lengths(cls, value, info):
+        if isinstance(value, str):
+            column = OrganizationSetting.__table__.columns.get(info.field_name)
+            limit = getattr(column.type, "length", None) if column is not None else None
+            # Plain input is encrypted before persisting, so reserve space for
+            # the stored representation instead of accepting unbounded values.
+            if info.field_name == "account_number":
+                limit = 100
+            if limit and len(value) > limit:
+                raise ValueError(f"Use at most {limit} characters")
+        return value
 
 class ZoomSettingsUpdateRequest(BaseModel):
     enforce_basic_login: bool | None = None
@@ -120,12 +145,9 @@ class ZoomMeetingGenerateRequest(BaseModel):
     timezone: str = "Asia/Kolkata"
 
 def mask_account_number(acc: str | None) -> str | None:
-    if not acc:
-        return None
-    acc_clean = acc.strip()
-    if len(acc_clean) <= 4:
-        return acc_clean
-    return f"{'•' * (len(acc_clean) - 4)}{acc_clean[-4:]}"
+    from app.core.financial_data import mask_account
+    return mask_account(acc)
+
 
 def compute_completion_percentage(settings: OrganizationSetting, org: Organization, zoom_ready: bool = False) -> int:
     if settings.account_completed:
@@ -394,7 +416,8 @@ async def update_studio_profile(
     if payload.account_holder_name is not None:
         settings.account_holder_name = payload.account_holder_name.strip()
     if payload.account_number is not None and payload.account_number.strip():
-        settings.account_number_enc = payload.account_number.strip()
+        from app.core.financial_data import encrypt_account
+        settings.account_number_enc = encrypt_account(payload.account_number.strip())
     if payload.ifsc_code is not None:
         settings.ifsc_code = payload.ifsc_code.strip().upper()
     if payload.upi_id is not None:
@@ -492,3 +515,46 @@ async def disconnect_zoom(org_id: uuid.UUID, tenant=Depends(require_org_role([Us
 async def generate_zoom_meeting(org_id: uuid.UUID, payload: ZoomMeetingGenerateRequest,
     tenant=Depends(require_org_role([UserRole.STUDIO])), db=Depends(get_db)):
     raise HTTPException(410, "Use a scheduled class to test Zoom; meetings require a saved class host and audit history")
+
+
+class AnalyticsResponse(BaseModel):
+    active_enrolled_students: int
+    active_recurring_batches: int
+    total_support_queries: int
+    projected_subscription_value: float
+    collected_revenue: float
+    billed_revenue: float
+    currency: str
+    explanation: str
+
+
+@router.get("/{org_id}/analytics", response_model=AnalyticsResponse)
+async def studio_analytics(org_id: uuid.UUID,
+    tenant=Depends(require_org_role([UserRole.STUDIO])), db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import func
+    from app.models.commerce import SessionEnrollment, Order, Payment
+    from app.models.session import Session, SessionPricing
+    from app.models.schedule import SessionScheduleRule
+    from app.models.support import SupportTicket
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    org = tenant[0]
+    active = await db.scalar(select(func.count(func.distinct(SessionEnrollment.user_id))).where(
+        SessionEnrollment.organization_id == org_id, SessionEnrollment.status == "ACTIVE",
+        SessionEnrollment.valid_from <= now,
+        (SessionEnrollment.valid_until.is_(None)) | (SessionEnrollment.valid_until >= now))) or 0
+    classes = [Session.organization_id == org_id, Session.deleted_at.is_(None), Session.is_active.is_(True)]
+    recurring = await db.scalar(select(func.count(Session.id)).where(*classes, Session.id.in_(
+        select(SessionScheduleRule.session_id).where(SessionScheduleRule.is_active.is_(True))))) or 0
+    projected = await db.scalar(select(func.sum(SessionPricing.price)).join(Session).where(
+        *classes, SessionPricing.currency == org.currency)) or 0
+    collected = await db.scalar(select(func.sum(Payment.amount)).join(Order).where(
+        Order.organization_id == org_id, Order.status == "PAID", Payment.status == "SUCCESS",
+        Payment.currency == org.currency, Order.currency == org.currency)) or 0
+    billed = await db.scalar(select(func.sum(Order.total_amount)).where(Order.organization_id == org_id,
+        Order.status.in_(["PENDING", "PAID"]), Order.currency == org.currency)) or 0
+    tickets = await db.scalar(select(func.count(SupportTicket.id)).where(SupportTicket.organization_id == org_id)) or 0
+    return AnalyticsResponse(active_enrolled_students=active, active_recurring_batches=recurring,
+        total_support_queries=tickets, projected_subscription_value=float(projected),
+        collected_revenue=float(collected), billed_revenue=float(billed), currency=org.currency,
+        explanation="Financial totals use this studio's currency only. Collected revenue is successful payments on paid orders; billed revenue is pending plus paid orders. Catalog value sums current active class prices and is not a revenue forecast. Manual admissions are not recorded as payments.")

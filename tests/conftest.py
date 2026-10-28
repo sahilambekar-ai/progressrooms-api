@@ -1,3 +1,8 @@
+import os
+
+os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("SECRET_KEY", "ci-only-auth-signing-key-7e19b6a4302d8f5c")
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession

@@ -1,879 +1,240 @@
+"""Transactional meeting events enqueue Zoom Mail; the worker performs delivery."""
 import uuid
-import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, List, Optional
-from sqlalchemy import select, update, and_
+from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
+from sqlalchemy import select, update, or_
 from sqlalchemy.orm import selectinload
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.common.dates import ensure_utc
+from app.core.config import settings
 from app.models.user import User
+from app.models.session import Session, SessionInstructor
 from app.models.organization import Organization, OrganizationMember
-from app.models.session import Session
 from app.models.schedule import ClassOccurrence
 from app.models.commerce import SessionEnrollment
-from app.models.communication import (
-    PlatformCommunicationSetting,
-    ClassReminderSchedule,
-    PendingMaterialChange,
-    CommunicationLog,
-    UserCommunicationPreference,
-)
-from app.modules.communication.service import get_or_create_settings, check_and_increment_studio_budget
-from app.modules.communication.templates import (
-    render_class_reminder_2h_wa,
-    render_class_reminder_15m_wa,
-    render_class_correction_wa,
-    render_class_cancellation_wa,
-    render_class_reminder_2h_email,
-    render_class_reminder_15m_email,
-    render_class_correction_email,
-    render_class_cancellation_email,
-)
-from app.core.config import settings
+from app.models.communication import ClassReminderSchedule, PendingMaterialChange, MeetingEmailDelivery, UserCommunicationPreference, PlatformCommunicationSetting
 
-logger = logging.getLogger("progressrooms.reminder_engine")
-
-MATERIAL_FIELDS = {"actual_start_at", "actual_end_at", "instructor_id", "meeting_url"}
+MATERIAL_FIELDS = {"actual_start_at", "actual_end_at", "instructor_id", "meeting_url", "name", "full_description", "duration_minutes"}
 
 
-def format_ist_time(dt: datetime) -> str:
-    # India Standard Time UTC+5:30
-    ist_offset = timedelta(hours=5, minutes=30)
-    ist_dt = dt.astimezone(timezone(ist_offset)) if dt.tzinfo else (dt + ist_offset)
-    return ist_dt.strftime("%I:%M %p IST, %b %d")
+def format_ist_time(dt):
+    return ensure_utc(dt).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%I:%M %p IST, %b %d")
 
 
-def calculate_suggested_join_time(start_dt: datetime) -> str:
-    # 5 minutes prior
+def calculate_suggested_join_time(start_dt):
     return format_ist_time(start_dt - timedelta(minutes=5))
 
 
-async def sync_reminder_schedules_for_occurrence(
-    db: AsyncSession,
-    occurrence_id: uuid.UUID,
-    new_start_at: datetime,
-    schedule_version: int = 1,
-    current_time: Optional[datetime] = None
-) -> List[ClassReminderSchedule]:
-    """
-    Recalculates reminder jobs against the occurrence's current start time.
-    Suppresses/supersedes jobs belonging to previous schedule versions.
-    Never sends a backlog of missed reminders.
-    """
-    now = current_time or datetime.now(timezone.utc)
-
-    # 1. Supersede any existing pending jobs
-    await db.execute(
-        update(ClassReminderSchedule)
-        .where(
-            ClassReminderSchedule.class_occurrence_id == occurrence_id,
-            ClassReminderSchedule.status == "PENDING"
-        )
-        .values(status="SUPERSEDED")
-    )
-
-    created_jobs: List[ClassReminderSchedule] = []
-
-    target_2h = new_start_at - timedelta(hours=2)
-    target_15m = new_start_at - timedelta(minutes=15)
-
-    # 2-hour reminder
-    if now < target_2h:
-        job_2h = ClassReminderSchedule(
-            class_occurrence_id=occurrence_id,
-            schedule_version=schedule_version,
-            reminder_type="REMINDER_2H",
-            target_time=target_2h,
-            status="PENDING"
-        )
-        db.add(job_2h)
-        created_jobs.append(job_2h)
-    elif target_2h <= now < target_15m:
-        # Created or rescheduled within 2 hours: send 1 immediate preparation reminder
-        job_immediate = ClassReminderSchedule(
-            class_occurrence_id=occurrence_id,
-            schedule_version=schedule_version,
-            reminder_type="REMINDER_2H",
-            target_time=now,
-            status="PENDING"
-        )
-        db.add(job_immediate)
-        created_jobs.append(job_immediate)
-
-    # 15-minute reminder
-    if now < target_15m:
-        job_15m = ClassReminderSchedule(
-            class_occurrence_id=occurrence_id,
-            schedule_version=schedule_version,
-            reminder_type="REMINDER_15M",
-            target_time=target_15m,
-            status="PENDING"
-        )
-        db.add(job_15m)
-        created_jobs.append(job_15m)
-    elif target_15m <= now < new_start_at:
-        # Created or rescheduled within 15 minutes: send 1 immediate starting soon notice
-        job_imm_15 = ClassReminderSchedule(
-            class_occurrence_id=occurrence_id,
-            schedule_version=schedule_version,
-            reminder_type="REMINDER_15M",
-            target_time=now,
-            status="PENDING"
-        )
-        db.add(job_imm_15)
-        created_jobs.append(job_imm_15)
-
-    await db.flush()
-    return created_jobs
-
-
-async def record_class_edit(
-    db: AsyncSession,
-    occurrence_id: uuid.UUID,
-    changed_fields: Dict[str, Any],
-    old_values: Dict[str, Any],
-    current_time: Optional[datetime] = None
-) -> Dict[str, Any]:
-    """
-    Evaluates class modifications according to the product specification:
-    - Edits before T-2h: Silent update. Reminders will include final state. No notifications sent.
-    - Material edits after a reminder has been sent: Consolidate with a 2-minute debounce window.
-    - Non-material edits (description, cover photo): No standalone notifications.
-    - Class moved earlier where waiting risks missing: Notify promptly.
-    """
-    now = current_time or datetime.now(timezone.utc)
-
-    # Check if a reminder has ALREADY been sent for this occurrence
-    has_sent_reminder = await db.scalar(
-        select(ClassReminderSchedule.id).where(
-            ClassReminderSchedule.class_occurrence_id == occurrence_id,
-            ClassReminderSchedule.status == "SENT"
-        ).limit(1)
-    ) is not None
-
-    material_changes = {k: v for k, v in changed_fields.items() if k in MATERIAL_FIELDS}
-
-    if not has_sent_reminder:
-        # Edits before first reminder: Routine changes update the application without sending messages.
-        # If start time changed, recalculate pending reminder jobs against new start time
-        if "actual_start_at" in changed_fields:
-            await sync_reminder_schedules_for_occurrence(
-                db=db,
-                occurrence_id=occurrence_id,
-                new_start_at=changed_fields["actual_start_at"],
-                current_time=now
-            )
-        return {
-            "action": "SILENT_UPDATE",
-            "message": "Routine edit saved silently before reminder window. Final details will be included in the scheduled reminder.",
-            "notifications_sent": 0
-        }
-
-    # If reminder was already sent, check for material change
-    if not material_changes:
-        return {
-            "action": "NON_MATERIAL_IGNORED",
-            "message": "Non-material edit (description/notes/images) saved without standalone notification.",
-            "notifications_sent": 0
-        }
-
-    # Material change after reminder was sent: Consolidate in 2-minute debounce window
-    old_start = old_values.get("actual_start_at")
-    new_start = changed_fields.get("actual_start_at")
-    moved_earlier = False
-    if old_start and new_start and new_start < old_start:
-        moved_earlier = True
-
-    # If moved earlier and class starts in < 2 hours, expedite correction immediately
-    expedite = moved_earlier and ((new_start - now).total_seconds() < 7200)
-    debounce_delta = timedelta(seconds=0 if expedite else 120)
-
-    # Upsert into PendingMaterialChange
-    stmt = select(PendingMaterialChange).where(
-        PendingMaterialChange.class_occurrence_id == occurrence_id,
-        PendingMaterialChange.processed == False
-    )
-    existing_change = (await db.execute(stmt)).scalar_one_or_none()
-
-    if existing_change:
-        # Merge changes
-        merged = dict(existing_change.changes_summary)
-        merged.update({k: str(v) for k, v in material_changes.items()})
-        existing_change.changes_summary = merged
-        if expedite:
-            existing_change.debounce_until = now
+async def recipients_for(db, occ):
+    """Only enrollments valid for this occurrence, plus its assigned active teachers."""
+    users = list((await db.scalars(select(User).join(SessionEnrollment, SessionEnrollment.user_id == User.id).where(
+        SessionEnrollment.session_id == occ.session_id,
+        SessionEnrollment.organization_id == occ.organization_id,
+        SessionEnrollment.status == "ACTIVE", SessionEnrollment.valid_from <= occ.actual_start_at,
+        or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until >= occ.actual_start_at),
+        or_(SessionEnrollment.total_sessions.is_(None), SessionEnrollment.sessions_attended < SessionEnrollment.total_sessions),
+        User.is_active.is_(True)))).all())
+    teachers = select(User).join(OrganizationMember, OrganizationMember.user_id == User.id).where(
+        OrganizationMember.organization_id == occ.organization_id, OrganizationMember.is_active.is_(True), User.is_active.is_(True))
+    if occ.instructor_id:
+        teachers = teachers.where(OrganizationMember.id == occ.instructor_id)
     else:
-        new_change = PendingMaterialChange(
-            class_occurrence_id=occurrence_id,
-            first_change_at=now,
-            debounce_until=now + debounce_delta,
-            changes_summary={k: str(v) for k, v in material_changes.items()},
-            processed=False
-        )
-        db.add(new_change)
-
-    # If start time changed, update subsequent reminder jobs
-    if new_start:
-        await sync_reminder_schedules_for_occurrence(
-            db=db,
-            occurrence_id=occurrence_id,
-            new_start_at=new_start,
-            current_time=now
-        )
-
-    await db.flush()
-    return {
-        "action": "CORRECTION_QUEUED",
-        "expedited": expedite,
-        "message": "Material edit queued for consolidated correction notification." if not expedite else "Expedited material correction queued (moved earlier).",
-        "notifications_sent": 0
-    }
+        teachers = teachers.where(OrganizationMember.id.in_(select(SessionInstructor.member_id).where(SessionInstructor.session_id == occ.session_id)))
+    users.extend((await db.scalars(teachers)).all())
+    return list({user.id: user for user in users if user.email}.values())
 
 
-async def handle_class_cancellation(
-    db: AsyncSession,
-    occurrence_id: uuid.UUID,
-    reason: Optional[str] = None,
-    current_time: Optional[datetime] = None
-) -> int:
-    """
-    Cancels all pending reminders for this class and immediately dispatches cancellation notices
-    to enrolled students and assigned teachers.
-    """
+async def queue_meeting_email(db, occ, message_type, event_key, *, recipient_id=None, exclude_recipient_ids=(), reason=None, current_time=None):
+    """Caller holds the occurrence lock. Enqueue inside the class-edit transaction."""
     now = current_time or datetime.now(timezone.utc)
-
-    # 1. Cancel pending reminder jobs
-    await db.execute(
-        update(ClassReminderSchedule)
-        .where(
-            ClassReminderSchedule.class_occurrence_id == occurrence_id,
-            ClassReminderSchedule.status == "PENDING"
-        )
-        .values(status="CANCELLED")
-    )
-
-    # 2. Fetch occurrence, session, studio, and enrolled students
-    stmt = (
-        select(ClassOccurrence)
-        .options(
-            selectinload(ClassOccurrence.session),
-            selectinload(ClassOccurrence.instructor).selectinload(OrganizationMember.user),
-            selectinload(ClassOccurrence.session).selectinload(Session.organization),
-            selectinload(ClassOccurrence.session).selectinload(Session.enrollments).selectinload(SessionEnrollment.user),
-        )
-        .where(ClassOccurrence.id == occurrence_id)
-    )
-    occ = (await db.execute(stmt)).scalar_one_or_none()
-    if not occ or not occ.session:
-        return 0
-
-    studio_name = occ.session.organization.name if occ.session.organization else "Studio"
-    class_name = occ.session.name
-    time_ist = format_ist_time(occ.actual_start_at)
-
-    settings_summary = await get_or_create_settings(db)
-    notifications_sent = 0
-
-    # Collect recipient users (enrolled active students + assigned teacher)
-    recipients: List[User] = []
-    if occ.session.enrollments:
-        for enr in occ.session.enrollments:
-            if enr.status == "ACTIVE" and enr.user and enr.user not in recipients:
-                recipients.append(enr.user)
-
-    if occ.instructor and occ.instructor.user and occ.instructor.user not in recipients:
-        recipients.append(occ.instructor.user)
-
+    recipients = await recipients_for(db, occ)
+    if recipient_id:
+        recipients = [user for user in recipients if user.id == recipient_id]
+    existing = set((await db.scalars(select(MeetingEmailDelivery.recipient_user_id).where(
+        MeetingEmailDelivery.event_key == event_key))).all())
+    count = 0
     for user in recipients:
-        # Check user communication preferences
-        pref = await db.scalar(
-            select(UserCommunicationPreference).where(UserCommunicationPreference.user_id == user.id)
-        )
-
-        # A. WhatsApp cancellation
-        wa_target = user.whatsapp_number or user.phone
-        if wa_target:
-            if not settings_summary.whatsapp_enabled:
-                db.add(CommunicationLog(
-                    recipient_user_id=user.id,
-                    organization_id=occ.organization_id,
-                    recipient_phone=wa_target,
-                    channel="WHATSAPP_CLASSES",
-                    message_type="CLASS_CANCELLATION",
-                    status="SUPPRESSED",
-                    suppression_reason="Suppressed: whatsapp disabled",
-                    subject_or_title=f"🛑 Cancelled: {class_name}",
-                    metadata_json={"occurrence_id": str(occ.id), "reason": reason}
-                ))
-            elif pref and pref.whatsapp_opted_out:
-                db.add(CommunicationLog(
-                    recipient_user_id=user.id,
-                    organization_id=occ.organization_id,
-                    recipient_phone=wa_target,
-                    channel="WHATSAPP_CLASSES",
-                    message_type="CLASS_CANCELLATION",
-                    status="SUPPRESSED",
-                    suppression_reason="Suppressed: recipient opt-out",
-                    subject_or_title=f"🛑 Cancelled: {class_name}"
-                ))
-            else:
-                budget_ok, budget_reason = await check_and_increment_studio_budget(
-                    db=db,
-                    organization_id=occ.organization_id,
-                    channel="WHATSAPP_CLASSES",
-                    message_type="CLASS_CANCELLATION"
-                )
-                if not budget_ok:
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_phone=wa_target,
-                        channel="WHATSAPP_CLASSES",
-                        message_type="CLASS_CANCELLATION",
-                        status="SUPPRESSED",
-                        suppression_reason=budget_reason,
-                        subject_or_title=f"🛑 Cancelled: {class_name}",
-                        metadata_json={"occurrence_id": str(occ.id), "reason": reason}
-                    ))
-                else:
-                    wa_body = render_class_cancellation_wa(studio_name, class_name, time_ist, reason)
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_phone=wa_target,
-                        channel="WHATSAPP_CLASSES",
-                        message_type="CLASS_CANCELLATION",
-                        status="SENT",
-                        subject_or_title=f"🛑 Cancelled: {class_name}",
-                        body_preview=wa_body[:200],
-                        metadata_json={"occurrence_id": str(occ.id), "reason": reason}
-                    ))
-                    notifications_sent += 1
-
-        # B. Email cancellation
-        if user.email:
-            if not settings_summary.email_enabled:
-                db.add(CommunicationLog(
-                    recipient_user_id=user.id,
-                    organization_id=occ.organization_id,
-                    recipient_email=user.email,
-                    channel="EMAIL",
-                    message_type="CLASS_CANCELLATION",
-                    status="SUPPRESSED",
-                    suppression_reason="Suppressed: email disabled",
-                    subject_or_title=f"🛑 Cancelled: {class_name}"
-                ))
-            elif pref and pref.email_opted_out:
-                db.add(CommunicationLog(
-                    recipient_user_id=user.id,
-                    organization_id=occ.organization_id,
-                    recipient_email=user.email,
-                    channel="EMAIL",
-                    message_type="CLASS_CANCELLATION",
-                    status="SUPPRESSED",
-                    suppression_reason="Suppressed: recipient opt-out",
-                    subject_or_title=f"🛑 Cancelled: {class_name}"
-                ))
-            else:
-                budget_ok, budget_reason = await check_and_increment_studio_budget(
-                    db=db,
-                    organization_id=occ.organization_id,
-                    channel="EMAIL",
-                    message_type="CLASS_CANCELLATION"
-                )
-                if not budget_ok:
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_email=user.email,
-                        channel="EMAIL",
-                        message_type="CLASS_CANCELLATION",
-                        status="SUPPRESSED",
-                        suppression_reason=budget_reason,
-                        subject_or_title=f"🛑 Cancelled: {class_name}",
-                        metadata_json={"occurrence_id": str(occ.id), "reason": reason}
-                    ))
-                else:
-                    subj, _ = render_class_cancellation_email(user.full_name, studio_name, class_name, time_ist, reason)
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_email=user.email,
-                        channel="EMAIL",
-                        message_type="CLASS_CANCELLATION",
-                        status="SENT",
-                        subject_or_title=subj,
-                        body_preview=f"Class cancelled: {class_name} at {studio_name}",
-                        metadata_json={"occurrence_id": str(occ.id), "reason": reason}
-                    ))
-                    notifications_sent += 1
+        if user.id in existing or user.id in exclude_recipient_ids:
+            continue
+        db.add(MeetingEmailDelivery(class_occurrence_id=occ.id, recipient_user_id=user.id,
+            event_key=event_key, message_type=message_type, scheduled_start_at=occ.actual_start_at,
+            available_at=now, reason=reason, status="PENDING"))
+        count += 1
+    await db.flush()
+    return count
 
 
-    await db.commit()
-    return notifications_sent
+async def sync_reminder_schedules_for_occurrence(db, occurrence_id, new_start_at, schedule_version=1, current_time=None):
+    now = ensure_utc(current_time or datetime.now(timezone.utc))
+    start = ensure_utc(new_start_at)
+    await db.execute(update(ClassReminderSchedule).where(ClassReminderSchedule.class_occurrence_id == occurrence_id,
+        ClassReminderSchedule.status == "PENDING").values(status="SUPERSEDED"))
+    await db.execute(update(MeetingEmailDelivery).where(MeetingEmailDelivery.class_occurrence_id == occurrence_id,
+        MeetingEmailDelivery.message_type.in_(["REMINDER_30M", "CLASS_INVITE"]),
+        MeetingEmailDelivery.status.in_(["PENDING", "RETRY"])).values(status="SUPERSEDED"))
+    if start <= now:
+        return []
+    job = ClassReminderSchedule(class_occurrence_id=occurrence_id, schedule_version=schedule_version,
+        reminder_type="REMINDER_30M", target_time=max(now, start - timedelta(minutes=30)), status="PENDING", details_snapshot={"start_at": start.isoformat()})
+    db.add(job)
+    await db.flush()
+    return [job]
 
 
-async def dispatch_pending_reminders(
-    db: AsyncSession,
-    as_of_time: Optional[datetime] = None,
-    occurrence_id: Optional[uuid.UUID] = None
-) -> int:
-    """
-    Finds and dispatches due ClassReminderSchedules (target_time <= as_of_time).
-    Enforces backend channel switches (WhatsApp & Email).
-    Uses the latest details at dispatch time.
-    """
-    now = as_of_time or datetime.now(timezone.utc)
-    settings_summary = await get_or_create_settings(db)
+async def record_class_edit(db, occurrence_id, changed_fields, old_values, current_time=None):
+    now = ensure_utc(current_time or datetime.now(timezone.utc))
+    occ = await db.scalar(select(ClassOccurrence).where(ClassOccurrence.id == occurrence_id).with_for_update())
+    if not occ:
+        return {"action": "NOT_FOUND", "notifications_sent": 0}
+    material = {key: value for key, value in changed_fields.items() if key in MATERIAL_FIELDS}
+    if not material:
+        return {"action": "NON_MATERIAL_IGNORED", "notifications_sent": 0}
+    if "actual_start_at" in material:
+        await sync_reminder_schedules_for_occurrence(db, occurrence_id, material["actual_start_at"], current_time=now)
+    change = await db.scalar(select(PendingMaterialChange).where(
+        PendingMaterialChange.class_occurrence_id == occurrence_id, PendingMaterialChange.processed.is_(False)))
+    summary = {key: str(value) for key, value in material.items()}
+    if change:
+        change.changes_summary = dict(change.changes_summary, **summary)
+    else:
+        change = PendingMaterialChange(class_occurrence_id=occurrence_id, first_change_at=now,
+            debounce_until=now + timedelta(seconds=120), changes_summary=summary, processed=False)
+        db.add(change)
+    new_start = material.get("actual_start_at")
+    if new_start and old_values.get("actual_start_at") and ensure_utc(new_start) < ensure_utc(old_values["actual_start_at"]):
+        change.debounce_until = now
+    await db.flush()
+    return {"action": "CORRECTION_QUEUED", "notifications_sent": 0}
 
-    stmt = (
-        select(ClassReminderSchedule)
-        .options(
-            selectinload(ClassReminderSchedule.occurrence)
-            .selectinload(ClassOccurrence.session)
-            .selectinload(Session.organization),
-            selectinload(ClassReminderSchedule.occurrence)
-            .selectinload(ClassOccurrence.instructor)
-            .selectinload(OrganizationMember.user),
-            selectinload(ClassReminderSchedule.occurrence)
-            .selectinload(ClassOccurrence.session)
-            .selectinload(Session.enrollments)
-            .selectinload(SessionEnrollment.user),
-        )
-        .where(
-            ClassReminderSchedule.status == "PENDING",
-            ClassReminderSchedule.target_time <= now
-        )
-    )
+
+async def handle_class_cancellation(db, occurrence_id, reason=None, current_time=None):
+    now = current_time or datetime.now(timezone.utc)
+    occ = await db.scalar(select(ClassOccurrence).where(ClassOccurrence.id == occurrence_id).with_for_update())
+    if not occ:
+        return 0
+    await db.execute(update(ClassReminderSchedule).where(ClassReminderSchedule.class_occurrence_id == occurrence_id,
+        ClassReminderSchedule.status == "PENDING").values(status="CANCELLED"))
+    await db.execute(update(MeetingEmailDelivery).where(MeetingEmailDelivery.class_occurrence_id == occurrence_id,
+        MeetingEmailDelivery.status.in_(["PENDING", "RETRY"])).values(status="CANCELLED"))
+    await db.execute(update(PendingMaterialChange).where(PendingMaterialChange.class_occurrence_id == occurrence_id,
+        PendingMaterialChange.processed.is_(False)).values(processed=True))
+    return await queue_meeting_email(db, occ, "CLASS_CANCELLATION", f"cancel:{occ.id}", reason=reason, current_time=now)
+
+
+async def backfill_reminders(db, now, organization_id=None):
+    """Catch existing and newly booked occurrences without replaying legacy reminders."""
+    rows = (await db.scalars(select(ClassOccurrence).join(Session, Session.id == ClassOccurrence.session_id).where(
+        ClassOccurrence.actual_start_at > now, ClassOccurrence.actual_start_at <= now + timedelta(days=7),
+        *([ClassOccurrence.organization_id == organization_id] if organization_id else []),
+        ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED"]), Session.is_active.is_(True), Session.deleted_at.is_(None),
+        ~select(ClassReminderSchedule.id).where(ClassReminderSchedule.class_occurrence_id == ClassOccurrence.id,
+            ClassReminderSchedule.reminder_type == "REMINDER_30M", ClassReminderSchedule.status != "SUPERSEDED").exists()
+    ).order_by(ClassOccurrence.actual_start_at).limit(100).with_for_update(skip_locked=True, of=ClassOccurrence))).all()
+    for occ in rows:
+        await sync_reminder_schedules_for_occurrence(db, occ.id, occ.actual_start_at, current_time=now)
+    await db.flush()
+
+
+async def dispatch_pending_reminders(db, as_of_time=None, occurrence_id=None, organization_id=None):
+    """Expand due jobs into per-recipient queue records; no network calls here."""
+    now = ensure_utc(as_of_time or datetime.now(timezone.utc))
+    stmt = select(ClassReminderSchedule).where(ClassReminderSchedule.status == "PENDING", ClassReminderSchedule.target_time <= now)
     if occurrence_id:
         stmt = stmt.where(ClassReminderSchedule.class_occurrence_id == occurrence_id)
-
-    result = await db.execute(stmt)
-    due_jobs = result.scalars().all()
-
-    total_dispatched = 0
-
-    for job in due_jobs:
-        occ = job.occurrence
-        if not occ or not occ.session or occ.status == "CANCELLED":
+    if organization_id:
+        stmt = stmt.where(ClassReminderSchedule.class_occurrence_id.in_(select(ClassOccurrence.id).where(ClassOccurrence.organization_id == organization_id)))
+    jobs = (await db.scalars(stmt.order_by(ClassReminderSchedule.target_time).limit(100).with_for_update(skip_locked=True))).all()
+    count = 0
+    for job in jobs:
+        occ = await db.scalar(select(ClassOccurrence).where(ClassOccurrence.id == job.class_occurrence_id).with_for_update())
+        session = await db.get(Session, occ.session_id) if occ else None
+        if not occ or not session or occ.status == "CANCELLED" or not session.is_active or session.deleted_at:
             job.status = "CANCELLED"
-            continue
-
-        from app.modules.billing.saas import operational_access
-        if not await operational_access(db, occ.organization_id):
-            continue
-
-        studio_name = occ.session.organization.name if occ.session.organization else "Studio"
-        class_name = occ.session.name
-        teacher_name = occ.instructor.user.full_name if (occ.instructor and occ.instructor.user) else "Assigned Instructor"
-        time_ist = format_ist_time(occ.actual_start_at)
-        join_early_ist = calculate_suggested_join_time(occ.actual_start_at)
-        duration_mins = occ.session.duration_minutes or 60
-
-        # Secure portal link: checks student enrollment upon click
-        public_origin = getattr(settings, "WEBSITE_PUBLIC_ORIGIN", "http://localhost:3000")
-        join_url = f"{public_origin}/student?studio={occ.organization_id}&class={occ.session_id}&occ={occ.id}"
-
-        # Collect recipients
-        recipients: List[User] = []
-        if occ.session.enrollments:
-            for enr in occ.session.enrollments:
-                if enr.status == "ACTIVE" and enr.user and enr.user not in recipients:
-                    recipients.append(enr.user)
-        if occ.instructor and occ.instructor.user and occ.instructor.user not in recipients:
-            recipients.append(occ.instructor.user)
-
-        job_sent = False
-
-        for user in recipients:
-            pref = await db.scalar(
-                select(UserCommunicationPreference).where(UserCommunicationPreference.user_id == user.id)
-            )
-
-            # 1. WhatsApp send
-            wa_target = user.whatsapp_number or user.phone
-            if wa_target:
-                if not settings_summary.whatsapp_enabled:
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_phone=wa_target,
-                        channel="WHATSAPP_CLASSES",
-                        message_type=job.reminder_type,
-                        status="SUPPRESSED",
-                        suppression_reason="Suppressed: whatsapp disabled",
-                        subject_or_title=f"Reminder: {class_name}",
-                        metadata_json={"occurrence_id": str(occ.id), "schedule_version": job.schedule_version}
-                    ))
-                elif pref and pref.whatsapp_opted_out:
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_phone=wa_target,
-                        channel="WHATSAPP_CLASSES",
-                        message_type=job.reminder_type,
-                        status="SUPPRESSED",
-                        suppression_reason="Suppressed: recipient opt-out",
-                        subject_or_title=f"Reminder: {class_name}"
-                    ))
-                else:
-                    budget_ok, budget_reason = await check_and_increment_studio_budget(
-                        db=db,
-                        organization_id=occ.organization_id,
-                        channel="WHATSAPP_CLASSES",
-                        message_type=job.reminder_type
-                    )
-                    if not budget_ok:
-                        db.add(CommunicationLog(
-                            recipient_user_id=user.id,
-                            organization_id=occ.organization_id,
-                            recipient_phone=wa_target,
-                            channel="WHATSAPP_CLASSES",
-                            message_type=job.reminder_type,
-                            status="SUPPRESSED",
-                            suppression_reason=budget_reason,
-                            subject_or_title=f"Reminder: {class_name}",
-                            metadata_json={"occurrence_id": str(occ.id), "schedule_version": job.schedule_version}
-                        ))
-                    else:
-                        if job.reminder_type == "REMINDER_2H":
-                            wa_body = render_class_reminder_2h_wa(
-                                studio_name=studio_name,
-                                class_name=class_name,
-                                teacher_name=teacher_name,
-                                start_time_ist=time_ist,
-                                suggested_join_time_ist=join_early_ist,
-                                join_url=join_url
-                            )
-                        else:
-                            wa_body = render_class_reminder_15m_wa(
-                                studio_name=studio_name,
-                                class_name=class_name,
-                                teacher_name=teacher_name,
-                                start_time_ist=time_ist,
-                                suggested_join_time_ist=join_early_ist,
-                                join_url=join_url
-                            )
-
-                        db.add(CommunicationLog(
-                            recipient_user_id=user.id,
-                            organization_id=occ.organization_id,
-                            recipient_phone=wa_target,
-                            channel="WHATSAPP_CLASSES",
-                            message_type=job.reminder_type,
-                            status="SENT",
-                            subject_or_title=f"Reminder: {class_name}",
-                            body_preview=wa_body[:200],
-                            metadata_json={"occurrence_id": str(occ.id), "schedule_version": job.schedule_version}
-                        ))
-                        job_sent = True
-                        total_dispatched += 1
-
-            # 2. Email send
-            if user.email:
-                if not settings_summary.email_enabled:
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_email=user.email,
-                        channel="EMAIL",
-                        message_type=job.reminder_type,
-                        status="SUPPRESSED",
-                        suppression_reason="Suppressed: email disabled",
-                        subject_or_title=f"Reminder: {class_name}",
-                        metadata_json={"occurrence_id": str(occ.id), "schedule_version": job.schedule_version}
-                    ))
-                elif pref and pref.email_opted_out:
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_email=user.email,
-                        channel="EMAIL",
-                        message_type=job.reminder_type,
-                        status="SUPPRESSED",
-                        suppression_reason="Suppressed: recipient opt-out",
-                        subject_or_title=f"Reminder: {class_name}"
-                    ))
-                else:
-                    budget_ok, budget_reason = await check_and_increment_studio_budget(
-                        db=db,
-                        organization_id=occ.organization_id,
-                        channel="EMAIL",
-                        message_type=job.reminder_type
-                    )
-                    if not budget_ok:
-                        db.add(CommunicationLog(
-                            recipient_user_id=user.id,
-                            organization_id=occ.organization_id,
-                            recipient_email=user.email,
-                            channel="EMAIL",
-                            message_type=job.reminder_type,
-                            status="SUPPRESSED",
-                            suppression_reason=budget_reason,
-                            subject_or_title=f"Reminder: {class_name}",
-                            metadata_json={"occurrence_id": str(occ.id), "schedule_version": job.schedule_version}
-                        ))
-                    else:
-                        if job.reminder_type == "REMINDER_2H":
-                            subj, _ = render_class_reminder_2h_email(
-                                student_name=user.full_name,
-                                studio_name=studio_name,
-                                class_name=class_name,
-                                teacher_name=teacher_name,
-                                start_time_ist=time_ist,
-                                duration_minutes=duration_mins,
-                                suggested_join_time_ist=join_early_ist,
-                                join_url=join_url
-                            )
-                        else:
-                            subj, _ = render_class_reminder_15m_email(
-                                student_name=user.full_name,
-                                studio_name=studio_name,
-                                class_name=class_name,
-                                teacher_name=teacher_name,
-                                start_time_ist=time_ist,
-                                suggested_join_time_ist=join_early_ist,
-                                join_url=join_url
-                            )
-
-                        db.add(CommunicationLog(
-                            recipient_user_id=user.id,
-                            organization_id=occ.organization_id,
-                            recipient_email=user.email,
-                            channel="EMAIL",
-                            message_type=job.reminder_type,
-                            status="SENT",
-                            subject_or_title=subj,
-                            body_preview=f"{class_name} at {studio_name} ({time_ist})",
-                            metadata_json={"occurrence_id": str(occ.id), "schedule_version": job.schedule_version}
-                        ))
-                        job_sent = True
-                        total_dispatched += 1
+        elif job.reminder_type != "REMINDER_30M":
+            job.status = "SUPERSEDED"
+        elif ensure_utc(occ.actual_start_at) <= now:
+            job.status = "EXPIRED"
+        elif (job.details_snapshot or {}).get("start_at") != ensure_utc(occ.actual_start_at).isoformat():
+            job.status = "SUPERSEDED"
+        else:
+            key = f"reminder:{occ.id}:{ensure_utc(occ.actual_start_at).isoformat()}"
+            count += await queue_meeting_email(db, occ, "REMINDER_30M", key, current_time=now)
+            job.status = "QUEUED"
+    await db.flush()
+    return count
 
 
-        job.status = "SENT" if job_sent else "SUPPRESSED"
-        job.sent_at = now
-        job.details_snapshot = {
-            "studio_name": studio_name,
-            "class_name": class_name,
-            "teacher_name": teacher_name,
-            "start_time_ist": time_ist
-        }
-
-    await db.commit()
-    return total_dispatched
-
-
-async def process_debounced_material_corrections(
-    db: AsyncSession,
-    as_of_time: Optional[datetime] = None,
-    occurrence_id: Optional[uuid.UUID] = None
-) -> int:
-    """
-    Finds and dispatches consolidated correction notifications for occurrences whose
-    debounce window has expired (debounce_until <= as_of_time).
-    Merges repeated changes into a single consolidated correction notification.
-    """
+async def process_debounced_material_corrections(db, as_of_time=None, occurrence_id=None, organization_id=None):
     now = as_of_time or datetime.now(timezone.utc)
-    settings_summary = await get_or_create_settings(db)
-
-    stmt = (
-        select(PendingMaterialChange)
-        .options(
-            selectinload(PendingMaterialChange.occurrence)
-            .selectinload(ClassOccurrence.session)
-            .selectinload(Session.organization),
-            selectinload(PendingMaterialChange.occurrence)
-            .selectinload(ClassOccurrence.instructor)
-            .selectinload(OrganizationMember.user),
-            selectinload(PendingMaterialChange.occurrence)
-            .selectinload(ClassOccurrence.session)
-            .selectinload(Session.enrollments)
-            .selectinload(SessionEnrollment.user),
-        )
-        .where(
-            PendingMaterialChange.processed == False,
-            PendingMaterialChange.debounce_until <= now
-        )
-    )
+    stmt = select(PendingMaterialChange).where(PendingMaterialChange.processed.is_(False), PendingMaterialChange.debounce_until <= now)
     if occurrence_id:
         stmt = stmt.where(PendingMaterialChange.class_occurrence_id == occurrence_id)
-
-    result = await db.execute(stmt)
-    due_changes = result.scalars().all()
-
-    total_corrections_sent = 0
-
-    for change in due_changes:
-        occ = change.occurrence
-        if not occ or not occ.session or occ.status == "CANCELLED":
-            change.processed = True
-            continue
-
-        from app.modules.billing.saas import operational_access
-        if not await operational_access(db, occ.organization_id):
-            continue
-
-        studio_name = occ.session.organization.name if occ.session.organization else "Studio"
-        class_name = occ.session.name
-        latest_time_ist = format_ist_time(occ.actual_start_at)
-        join_url = f"{getattr(settings, 'WEBSITE_PUBLIC_ORIGIN', 'http://localhost:3000')}/student?studio={occ.organization_id}&class={occ.session_id}&occ={occ.id}"
-
-        # Construct readable change summary
-        diff_lines = []
-        for field, new_val in change.changes_summary.items():
-            if field == "actual_start_at":
-                diff_lines.append(f"• Start Time updated to: {latest_time_ist}")
-            elif field == "instructor_id":
-                teacher_name = occ.instructor.user.full_name if (occ.instructor and occ.instructor.user) else "New Instructor"
-                diff_lines.append(f"• Instructor updated to: {teacher_name}")
-            else:
-                diff_lines.append(f"• {field.replace('_', ' ').title()} updated")
-        summary_text = "\n".join(diff_lines)
-
-        recipients: List[User] = []
-        if occ.session.enrollments:
-            for enr in occ.session.enrollments:
-                if enr.status == "ACTIVE" and enr.user and enr.user not in recipients:
-                    recipients.append(enr.user)
-
-        for user in recipients:
-            pref = await db.scalar(
-                select(UserCommunicationPreference).where(UserCommunicationPreference.user_id == user.id)
-            )
-
-            # WhatsApp correction
-            wa_target = user.whatsapp_number or user.phone
-            if wa_target:
-                if not settings_summary.whatsapp_enabled:
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_phone=wa_target,
-                        channel="WHATSAPP_CLASSES",
-                        message_type="CLASS_CORRECTION",
-                        status="SUPPRESSED",
-                        suppression_reason="Suppressed: whatsapp disabled",
-                        subject_or_title=f"⚠️ Update: {class_name}"
-                    ))
-                elif pref and pref.whatsapp_opted_out:
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_phone=wa_target,
-                        channel="WHATSAPP_CLASSES",
-                        message_type="CLASS_CORRECTION",
-                        status="SUPPRESSED",
-                        suppression_reason="Suppressed: recipient opt-out",
-                        subject_or_title=f"⚠️ Update: {class_name}"
-                    ))
-                else:
-                    budget_ok, budget_reason = await check_and_increment_studio_budget(
-                        db=db,
-                        organization_id=occ.organization_id,
-                        channel="WHATSAPP_CLASSES",
-                        message_type="CLASS_CORRECTION"
-                    )
-                    if not budget_ok:
-                        db.add(CommunicationLog(
-                            recipient_user_id=user.id,
-                            organization_id=occ.organization_id,
-                            recipient_phone=wa_target,
-                            channel="WHATSAPP_CLASSES",
-                            message_type="CLASS_CORRECTION",
-                            status="SUPPRESSED",
-                            suppression_reason=budget_reason,
-                            subject_or_title=f"⚠️ Update: {class_name}",
-                            metadata_json={"occurrence_id": str(occ.id), "changes": change.changes_summary}
-                        ))
-                    else:
-                        wa_body = render_class_correction_wa(
-                            studio_name=studio_name,
-                            class_name=class_name,
-                            changes_summary=summary_text,
-                            latest_start_time_ist=latest_time_ist,
-                            join_url=join_url
-                        )
-                        db.add(CommunicationLog(
-                            recipient_user_id=user.id,
-                            organization_id=occ.organization_id,
-                            recipient_phone=wa_target,
-                            channel="WHATSAPP_CLASSES",
-                            message_type="CLASS_CORRECTION",
-                            status="SENT",
-                            subject_or_title=f"⚠️ Update: {class_name}",
-                            body_preview=wa_body[:200],
-                            metadata_json={"occurrence_id": str(occ.id), "changes": change.changes_summary}
-                        ))
-                        total_corrections_sent += 1
-
-            # Email correction
-            if user.email:
-                if not settings_summary.email_enabled:
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_email=user.email,
-                        channel="EMAIL",
-                        message_type="CLASS_CORRECTION",
-                        status="SUPPRESSED",
-                        suppression_reason="Suppressed: email disabled",
-                        subject_or_title=f"⚠️ Update: {class_name}"
-                    ))
-                elif pref and pref.email_opted_out:
-                    db.add(CommunicationLog(
-                        recipient_user_id=user.id,
-                        organization_id=occ.organization_id,
-                        recipient_email=user.email,
-                        channel="EMAIL",
-                        message_type="CLASS_CORRECTION",
-                        status="SUPPRESSED",
-                        suppression_reason="Suppressed: recipient opt-out",
-                        subject_or_title=f"⚠️ Update: {class_name}"
-                    ))
-                else:
-                    budget_ok, budget_reason = await check_and_increment_studio_budget(
-                        db=db,
-                        organization_id=occ.organization_id,
-                        channel="EMAIL",
-                        message_type="CLASS_CORRECTION"
-                    )
-                    if not budget_ok:
-                        db.add(CommunicationLog(
-                            recipient_user_id=user.id,
-                            organization_id=occ.organization_id,
-                            recipient_email=user.email,
-                            channel="EMAIL",
-                            message_type="CLASS_CORRECTION",
-                            status="SUPPRESSED",
-                            suppression_reason=budget_reason,
-                            subject_or_title=f"⚠️ Update: {class_name}",
-                            metadata_json={"occurrence_id": str(occ.id), "changes": change.changes_summary}
-                        ))
-                    else:
-                        subj, _ = render_class_correction_email(
-                            student_name=user.full_name,
-                            studio_name=studio_name,
-                            class_name=class_name,
-                            changes_summary=summary_text,
-                            latest_start_time_ist=latest_time_ist,
-                            join_url=join_url
-                        )
-                        db.add(CommunicationLog(
-                            recipient_user_id=user.id,
-                            organization_id=occ.organization_id,
-                            recipient_email=user.email,
-                            channel="EMAIL",
-                            message_type="CLASS_CORRECTION",
-                            status="SENT",
-                            subject_or_title=subj,
-                            body_preview=summary_text[:200],
-                            metadata_json={"occurrence_id": str(occ.id), "changes": change.changes_summary}
-                        ))
-                        total_corrections_sent += 1
-
-
+    if organization_id:
+        stmt = stmt.where(PendingMaterialChange.class_occurrence_id.in_(select(ClassOccurrence.id).where(ClassOccurrence.organization_id == organization_id)))
+    changes = (await db.scalars(stmt.limit(100).with_for_update(skip_locked=True))).all()
+    count = 0
+    for change in changes:
+        occ = await db.scalar(select(ClassOccurrence).where(ClassOccurrence.id == change.class_occurrence_id).with_for_update())
+        if occ and occ.status != "CANCELLED" and ensure_utc(occ.actual_end_at) > ensure_utc(now):
+            count += await queue_meeting_email(db, occ, "CLASS_CORRECTION", f"change:{change.id}",
+                reason="Class details have changed. Please check the latest details below.", current_time=now)
         change.processed = True
+    await db.flush()
+    return count
 
+
+async def render_meeting_email(db, occ, user, kind, reason=None):
+    session = await db.get(Session, occ.session_id)
+    org = await db.get(Organization, occ.organization_id)
+    zone = ZoneInfo(org.timezone or "Asia/Kolkata")
+    start = ensure_utc(occ.actual_start_at).astimezone(zone).strftime("%A, %d %b %Y, %I:%M %p %Z")
+    end = ensure_utc(occ.actual_end_at).astimezone(zone).strftime("%I:%M %p %Z")
+    titles = {"REMINDER_30M": "Class reminder", "CLASS_INVITE": "Class invitation", "CLASS_CORRECTION": "Class updated", "CLASS_CANCELLATION": "Class cancelled"}
+    subject = f"{titles[kind]}: {session.name} — {org.name}"
+    body = f"Hello {user.full_name},\n\n{titles[kind]}\n\nClass: {session.name}\nStudio: {org.name}\nStart: {start}\nEnd: {end}\n"
+    if kind == "REMINDER_30M":
+        body += "\nYour class starts soon. This reminder is scheduled 30 minutes before class.\n"
+    if reason:
+        body += f"\n{reason}\n"
+    if kind != "CLASS_CANCELLATION":
+        # Role-aware authenticated access links never include private Zoom host credentials.
+        query = urlencode({"studio": str(org.id)})
+        body += f"\nOpen your class and join: {settings.WEBSITE_PUBLIC_ORIGIN.rstrip('/')}/meetings/{occ.id}?{query}\n"
+
+    return subject, body
+
+
+async def request_meeting_invites(db, occ, recipient_id=None):
+    from fastapi import HTTPException
+    now = datetime.now(timezone.utc)
+    session = await db.get(Session, occ.session_id)
+    if occ.status == "CANCELLED" or not session or not session.is_active or session.deleted_at or ensure_utc(occ.actual_end_at) <= now:
+        raise HTTPException(409, "Invitations can only be sent for an active, unfinished class")
+    recipients = await recipients_for(db, occ)
+    if recipient_id and recipient_id not in {user.id for user in recipients}:
+        raise HTTPException(403, "You do not have an eligible enrollment for this class")
+    channels = await db.scalar(select(PlatformCommunicationSetting).limit(1))
+    if channels and not channels.email_enabled:
+        raise HTTPException(409, "Email notifications are currently paused")
+    from app.modules.zoom.meetings import host_for_occurrence
+    from app.modules.communication.zoom_mail import SEND_SCOPES
+    conn = await host_for_occurrence(db, occ)
+    if conn.mode != "mock" and not SEND_SCOPES.intersection((conn.scopes or "").split()):
+        raise HTTPException(409, "The class host must authorize Zoom Mail before invitations can be sent")
+    # A one-minute cooldown makes double clicks/retries reuse the existing request.
+    recent = select(MeetingEmailDelivery).where(MeetingEmailDelivery.class_occurrence_id == occ.id,
+        MeetingEmailDelivery.message_type == "CLASS_INVITE", MeetingEmailDelivery.created_at >= now - timedelta(minutes=1),
+        MeetingEmailDelivery.status.notin_(["CANCELLED", "SUPERSEDED", "FAILED", "SUPPRESSED"]))
+    if recipient_id:
+        recent = recent.where(MeetingEmailDelivery.recipient_user_id == recipient_id)
+    existing = (await db.scalars(recent)).all()
+    addressed = {row.recipient_user_id for row in existing}
+    intended = {user.id for user in recipients if not recipient_id or user.id == recipient_id}
+    if intended and intended.issubset(addressed):
+        return {"status": "QUEUED", "recipients": len(intended), "message": "An invitation was already requested. Check your email shortly."}
+    count = await queue_meeting_email(db, occ, "CLASS_INVITE", f"invite:{occ.id}:{uuid.uuid4()}",
+        recipient_id=recipient_id, exclude_recipient_ids=addressed)
+    if not count:
+        raise HTTPException(409, "No eligible recipients have an email address")
     await db.commit()
-    return total_corrections_sent
+    return {"status": "QUEUED", "recipients": count, "message": f"Invitation queued for {count} recipient{'s' if count != 1 else ''} through Zoom Mail."}

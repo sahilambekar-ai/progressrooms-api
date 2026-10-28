@@ -20,6 +20,9 @@ async def test_migration_creates_communication_schema_and_seed_works(monkeypatch
     spec = importlib.util.spec_from_file_location("communication_migration", source)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
+    mail_spec = importlib.util.spec_from_file_location("mail_migration", source.with_name("032_zoom_meeting_mail.py"))
+    mail_migration = importlib.util.module_from_spec(mail_spec)
+    mail_spec.loader.exec_module(mail_migration)
     names = {model.__tablename__ for model in vars(communication).values()
              if isinstance(model, type) and model.__module__ == communication.__name__
              and hasattr(model, "__tablename__")}
@@ -31,6 +34,8 @@ async def test_migration_creates_communication_schema_and_seed_works(monkeypatch
                                                       if table.name not in names])
                 monkeypatch.setattr(migration, "op", Operations(MigrationContext.configure(sync)))
                 migration.upgrade()
+                monkeypatch.setattr(mail_migration, "op", Operations(MigrationContext.configure(sync)))
+                mail_migration.upgrade()
                 inspector = sa.inspect(sync)
                 for name in names:
                     assert {c["name"] for c in inspector.get_columns(name)} == set(Base.metadata.tables[name].columns.keys())
@@ -47,6 +52,8 @@ async def test_migration_creates_communication_schema_and_seed_works(monkeypatch
         async with engine.begin() as connection:
             def downgrade(sync):
                 monkeypatch.setattr(migration, "op", Operations(MigrationContext.configure(sync)))
+                monkeypatch.setattr(mail_migration, "op", Operations(MigrationContext.configure(sync)))
+                mail_migration.downgrade()
                 migration.downgrade()
                 assert not names.intersection(sa.inspect(sync).get_table_names())
                 assert sync.scalar(sa.text("SELECT count(*) FROM users")) == 68

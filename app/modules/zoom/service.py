@@ -55,7 +55,8 @@ def summary(conn):
         return None
     return {"connection_id": str(conn.id), "member_id": str(conn.member_id), "zoom_host_id": conn.zoom_user_id, "email": conn.email,
             "display_name": conn.display_name, "status": conn.status, "is_simulated": conn.mode == "mock", "version": conn.version,
-            "production_ready": conn.status == "ACTIVE" and conn.mode == "live"}
+            "production_ready": conn.status == "ACTIVE" and conn.mode == "live",
+            "zoom_mail_authorized": bool(set((conn.scopes or "").split()).intersection({"email:write:send_msg", "email:write:send_msg:admin", "mail:write", "mail:write:admin"}))}
 
 
 async def resolve_host(db, org_id, member_id=None, explicit_member_id=None):

@@ -59,6 +59,8 @@ async def delete_session(
     for occurrence in future:
         occurrence.status = OccurrenceStatus.CANCELLED.value
         occurrence.cancellation_reason = "Class batch deleted"
+        from app.modules.communication.reminder_engine import handle_class_cancellation
+        await handle_class_cancellation(db, occurrence.id, reason="Class batch deleted")
     await db.commit()
 
 @router.get("/class-types")
@@ -218,6 +220,12 @@ async def create_one_on_one_class(
         if not student_user:
             raise HTTPException(422, "Selected student was not found")
         actual_student_user_id = student_user.id
+
+    eligible_student = await db.scalar(select(User.id).where(
+        User.id == actual_student_user_id, User.role == "STUDENT", User.is_verified.is_(True),
+        User.is_active.is_(True), User.account_status == "ACTIVE", User.deleted_at.is_(None)))
+    if not eligible_student:
+        raise HTTPException(422, "Choose an active, verified student")
 
     # Find or create a 1-on-1 ClassType
     class_type = await db.scalar(
@@ -487,6 +495,13 @@ async def update_session(
         if payload.model_fields_set - {"pricing"}:
             raise HTTPException(403, "Teachers can edit class packages only")
 
+    minimum = payload.min_age if "min_age" in payload.model_fields_set else session.min_age
+    maximum = payload.max_age if "max_age" in payload.model_fields_set else session.max_age
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise HTTPException(422, "Minimum age must not exceed maximum age")
+    for field in ("min_age", "max_age"):
+        if field in payload.model_fields_set:
+            setattr(session, field, getattr(payload, field))
     if payload.name is not None:
         session.name = payload.name
     if "capacity" in payload.model_fields_set:
@@ -599,6 +614,15 @@ async def update_session(
             db.add(sr)
         await SchedulingEngine.generate_occurrences_for_session(db, session.id, days_ahead=30)
 
+    changed = payload.model_dump(exclude_unset=True)
+    material = {key: value for key, value in changed.items() if key in {"name", "full_description", "duration_minutes", "instructor_member_ids", "schedule_rules"}}
+    if material:
+        from app.modules.communication.reminder_engine import record_class_edit
+        occurrences = (await db.scalars(select(ClassOccurrence).where(
+            ClassOccurrence.session_id == session.id, ClassOccurrence.actual_end_at > datetime.now(timezone.utc),
+            ClassOccurrence.status.in_(["SCHEDULED", "RESCHEDULED", "IN_PROGRESS"])).with_for_update())).all()
+        for occurrence in occurrences:
+            await record_class_edit(db, occurrence.id, {"name": session.name}, {})
     await db.commit()
     await db.refresh(session)
     return {"id": str(session.id), "name": session.name, "is_active": session.is_active}

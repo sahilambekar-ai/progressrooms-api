@@ -1,3 +1,4 @@
+from app.common.webhook_body import read_webhook_body
 from app.common.purchase_policy import purchase_policy
 import uuid
 from pydantic import BaseModel, model_validator
@@ -72,6 +73,8 @@ async def verify_payment(
 
     if order.status == OrderStatus.PAID.value:
         enrollment = await db.scalar(select(SessionEnrollment).where(SessionEnrollment.order_id == order.id))
+        if not enrollment:
+            raise HTTPException(409, "Payment is confirmed but enrollment is unavailable. Contact your studio before paying again.")
         return {"success": True, "enrollment_id": str(enrollment.id), "message": "Already activated"}
     if order.status != OrderStatus.PENDING.value or payload.razorpay_order_id != order.provider_order_id:
         raise HTTPException(400, "Payment does not match this order")
@@ -141,18 +144,22 @@ async def razorpay_webhook(
     db: AsyncSession = Depends(get_db)
 ):
     import hashlib, hmac, json
-    raw = await request.body()
+    raw = await read_webhook_body(request)
     secret = settings.RAZORPAY_WEBHOOK_SECRET
     if not secret or secret.startswith("rzp_webhook_secret_mock"):
         raise HTTPException(503, "Payment webhooks are not configured")
     expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
-    if not x_razorpay_signature or not hmac.compare_digest(expected, x_razorpay_signature):
+    if not x_razorpay_signature or not hmac.compare_digest(expected.encode(), x_razorpay_signature.encode()):
         raise HTTPException(400, "Invalid webhook signature")
     try:
         body = json.loads(raw)
-    except ValueError:
+        if not isinstance(body, dict):
+            raise ValueError()
+        entity = body.get("payload", {}).get("payment", {}).get("entity", {})
+        if not isinstance(entity, dict):
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError, RecursionError):
         raise HTTPException(400, "Invalid webhook payload")
-    entity = body.get("payload", {}).get("payment", {}).get("entity", {})
     event_type = body.get("event", "unknown")
     event_id = f"{event_type}:{entity.get('id', hashlib.sha256(raw).hexdigest())}"
     if await db.scalar(select(PaymentWebhookEvent.id).where(PaymentWebhookEvent.event_id == event_id)):

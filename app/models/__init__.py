@@ -3,6 +3,7 @@ from app.models.saas_billing import SaaSCheckout, SaaSWebhookEvent
 from app.models.platform_billing import StudentJoinEvent, StudentJoinTeacher, PlatformInvoice
 from app.models.user import User, UserSession
 from app.models.otp import UserOtp
+from app.models.auth_rate_limit import AuthRateLimit
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent, OrganizationSetting
 from app.models.plan import Plan, PlanFeature, OrganizationSubscription
 from app.models.session import ClassType, Session, SessionInstructor, SessionPricing, SessionRequirement
@@ -13,12 +14,14 @@ from app.models.website import WebsiteTemplate, OrganizationWebsite, Organizatio
 from app.models.audit import AuditLog
 from app.models.integration import OrganizationIntegration, Notification
 from app.models.membership_tier import MembershipTier, MembershipTierClass
+from app.models.support import SupportTicket, SupportMessage
 from app.models.communication import (
     PlatformCommunicationSetting,
     CommunicationChannelAuditLog,
     CommunicationLog,
     UserCommunicationPreference,
     ClassReminderSchedule,
+    MeetingEmailDelivery,
     PendingMaterialChange,
     StudioCommunicationBudget,
 )
@@ -31,6 +34,7 @@ __all__ = [
     "User",
     "UserSession",
     "UserOtp",
+    "AuthRateLimit",
     "Organization",
     "OrganizationMember",
     "OrganizationStudent",

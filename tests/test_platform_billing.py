@@ -228,7 +228,7 @@ async def test_dashboard_access_and_private_profile(db_session):
             assert studio_row["active_students"] == 0 and studio_row["estimated_platform_fee"] == 0
             assert "profile" not in studio_row and "account_number" not in studio_row
             profile = (await client.get(f"/admin/organizations/{org.id}", headers=headers(admin))).json()
-            assert profile["profile"]["account_number"] == "123456789"
+            assert profile["profile"]["account_number"] == "••••6789"
             assert profile["profile"]["address_line1"] == "Studio street"
             assert profile["website_url"] is None
             assert "must-not-leak" not in str(profile) and "teachers" not in profile and "students" not in profile

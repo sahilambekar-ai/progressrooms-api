@@ -151,14 +151,20 @@ async def get_public_organization_website(org_slug: str, db: AsyncSession = Depe
 
     from app.models.commerce import SessionEnrollment
     active_public_sessions = [s for s in org.sessions if s.is_public and s.is_active and s.deleted_at is None]
+    enrollment_counts = {}
+    if active_public_sessions:
+        enrollment_counts = dict((await db.execute(
+            select(SessionEnrollment.session_id, func.count(SessionEnrollment.id))
+            .where(
+                SessionEnrollment.organization_id == org.id,
+                SessionEnrollment.session_id.in_([s.id for s in active_public_sessions]),
+                SessionEnrollment.status == "ACTIVE",
+            )
+            .group_by(SessionEnrollment.session_id)
+        )).all())
     public_sessions = []
     for s in active_public_sessions:
-        enrolled_count = await db.scalar(
-            select(func.count(SessionEnrollment.id)).where(
-                SessionEnrollment.session_id == s.id,
-                SessionEnrollment.status == "ACTIVE"
-            )
-        ) or 0
+        enrolled_count = enrollment_counts.get(s.id, 0)
         remaining_spots = max(0, s.capacity - enrolled_count) if s.capacity is not None else None
         primary_instructor = s.instructors[0].member.user.full_name if s.instructors and s.instructors[0].member and s.instructors[0].member.user else None
         public_sessions.append({

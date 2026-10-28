@@ -2,6 +2,7 @@ import logging
 from typing import Optional, Dict, Any
 import httpx
 from app.core.config import settings
+from app.common.email_content import email_text, email_subject, first_name as recipient_first_name
 
 logger = logging.getLogger("progressrooms.email")
 BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
@@ -11,7 +12,9 @@ def _generate_otp_email_html(otp_code: str, recipient_name: str, purpose_display
     Renders an elegant, responsive HTML email template styled with
     the Progress Rooms nature studio aesthetic.
     """
-    first_name = recipient_name.strip().split()[0] if recipient_name else "Student"
+    first_name = email_text(recipient_first_name(recipient_name))
+    otp_code = email_text(otp_code)
+    purpose_display = email_text(purpose_display)
     
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -192,12 +195,12 @@ async def send_otp_email(
     Dispatches a transactional OTP verification email via Brevo REST API v3 using httpx.
     """
     if not getattr(settings, "BREVO_ENABLED", True):
-        logger.info(f"[Brevo Disabled] Skipping email send for {to_email}. OTP: {otp_code}")
+        logger.info("[Brevo Disabled] Verification email was not sent")
         return {"success": False, "error": "Brevo is disabled in configuration"}
 
     api_key = getattr(settings, "BREVO_API_KEY", "")
     if not api_key:
-        logger.warning(f"[Brevo Missing Key] BREVO_API_KEY not configured. OTP: {otp_code}")
+        logger.warning("[Brevo Missing Key] Verification email was not sent")
         return {"success": False, "error": "BREVO_API_KEY is not set"}
 
     purpose_labels = {
@@ -206,7 +209,7 @@ async def send_otp_email(
         "LOGIN_VERIFICATION": "Login Verification"
     }
     purpose_display = purpose_labels.get(purpose, "Verification")
-    subject = f"🌿 Your Progress Rooms Code ({otp_code})"
+    subject = email_subject(f"🌿 Your Progress Rooms Code ({otp_code})")
     html_content = _generate_otp_email_html(otp_code, to_name, purpose_display)
 
     headers = {
@@ -237,16 +240,14 @@ async def send_otp_email(
         if response.status_code in [200, 201]:
             resp_data = response.json() if response.content else {}
             message_id = resp_data.get("messageId", "ok")
-            logger.info(f"[Brevo Success] OTP email sent to {to_email} | Message ID: {message_id}")
+            logger.info("[Brevo Success] Verification email sent")
             return {"success": True, "message_id": message_id}
         elif response.status_code == 401:
-            err_data = response.json() if response.content else {}
-            err_msg = err_data.get("message", response.text)
-            logger.warning(f"[Brevo 401] Unauthorized / IP whitelist required: {err_msg} | OTP for {to_email}: {otp_code}")
-            return {"success": False, "error": "IP_NOT_AUTHORIZED", "details": err_msg, "otp_code": otp_code}
+            logger.warning("[Brevo 401] Verification email authorization failed")
+            return {"success": False, "error": "IP_NOT_AUTHORIZED"}
         else:
-            logger.error(f"[Brevo Error] HTTP {response.status_code}: {response.text}")
+            logger.error("[Brevo Error] Verification email failed with HTTP %s", response.status_code)
             return {"success": False, "error": f"HTTP_{response.status_code}", "details": response.text}
     except Exception as e:
-        logger.error(f"[Brevo Exception] Failed to send email to {to_email}: {str(e)}")
+        logger.error("[Brevo Exception] Verification email delivery failed")
         return {"success": False, "error": "EXCEPTION", "details": str(e)}

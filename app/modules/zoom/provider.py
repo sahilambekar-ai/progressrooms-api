@@ -9,10 +9,12 @@ import json
 
 
 class ProviderError(Exception):
-    def __init__(self, message="Zoom is temporarily unavailable", *, invalid_grant=False, ambiguous=False):
+    def __init__(self, message="Zoom is temporarily unavailable", *, invalid_grant=False, ambiguous=False, status_code=None, retry_after=None):
         super().__init__(message)
         self.invalid_grant = invalid_grant
         self.ambiguous = ambiguous
+        self.status_code = status_code
+        self.retry_after = retry_after
 
 
 def mode():
@@ -68,7 +70,8 @@ class ZoomProvider:
             return {}
         if result.status_code >= 400:
             raise ProviderError("Zoom authorization requires reconnecting" if result.status_code in {400, 401} and oauth else "Zoom rejected the operation; check account policies and permissions",
-                                invalid_grant=result.status_code == 401 or (oauth and result.status_code == 400), ambiguous=ambiguous and result.status_code >= 500)
+                                invalid_grant=result.status_code == 401 or (oauth and result.status_code == 400), ambiguous=ambiguous and result.status_code >= 500, status_code=result.status_code,
+                                retry_after=int(result.headers.get("Retry-After", "60")) if result.headers.get("Retry-After", "60").isdigit() else 60)
         return result.json() if result.content else {}
 
     async def exchange(self, code, state, member):

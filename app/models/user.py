@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Text, String, Boolean, DateTime, ForeignKey, CheckConstraint, Index, text
+from sqlalchemy import Text, String, Integer, Boolean, DateTime, ForeignKey, CheckConstraint, Index, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base, TimestampMixin, SoftDeleteMixin
@@ -29,6 +29,7 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     avatar_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     managed_password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     teacher_invitation_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)

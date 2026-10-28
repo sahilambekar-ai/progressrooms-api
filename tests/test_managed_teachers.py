@@ -47,5 +47,22 @@ async def test_invitation_once_then_on_changed_details(client, db_session, monke
         assert (await client.post(path+'/invitation',headers=auth(owner),json=confirmation)).status_code == 200
     assert len(deliveries)==1 and 'teacher-secret' in deliveries[0]['htmlContent']
     for _ in range(2):
-        assert (await client.put(path,headers=auth(owner),json={**confirmation,'name':'Updated'})).status_code==200
+        assert (await client.put(path,headers=auth(owner),json={**confirmation,'name':'Updated','profile_consent_confirmed':True,'profile_consent_reference':'TEST-CONSENT'})).status_code==200
     assert len(deliveries)==2
+
+@pytest.mark.asyncio
+async def test_teacher_password_change_revokes_existing_session(client, db_session):
+    owner, org, _ = await staff(db_session, 'STUDIO')
+    email = f'{uuid.uuid4().hex}@example.com'
+    response = await client.post('teachers', headers=auth(owner), json={
+        'name': 'Teacher', 'email': email, 'password': 'teacher-secret', 'studio_id': str(org.id)})
+    assert response.status_code == 201
+    token = (await client.post('auth/login', json={'email': email, 'password': 'teacher-secret'})).json()['access_token']
+    headers = {'Authorization': f'Bearer {token}'}
+    assert (await client.get('auth/me', headers=headers)).status_code == 200
+    update = await client.put(f"teachers/{response.json()['id']}", headers=auth(owner), json={
+        'studio_password': 'strong-password', 'password': 'replacement-secret'})
+    assert update.status_code == 200
+    assert (await client.get('auth/me', headers=headers)).status_code == 401
+    fresh = await client.post('auth/login', json={'email': email, 'password': 'replacement-secret'})
+    assert fresh.status_code == 200

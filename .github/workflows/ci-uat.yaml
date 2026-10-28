@@ -25,10 +25,15 @@ jobs:
           --health-cmd "pg_isready -U postgres -d progressrooms_ci"
           --health-interval 5s --health-timeout 5s --health-retries 12
     env:
+      APP_ENV: "test"
+      SECRET_KEY: "ci-only-auth-signing-key-7e19b6a4302d8f5c"
       BREVO_ENABLED: "false"
       DATABASE_URL: postgresql+asyncpg://postgres:ci-only-password@127.0.0.1:5432/progressrooms_ci
       SYNC_DATABASE_URL: postgresql://postgres:ci-only-password@127.0.0.1:5432/progressrooms_ci
       ZOOM_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:ci-only-password@127.0.0.1:5432/progressrooms_ci
+      DATABASE_REVIEW_PG_BIN: /usr/lib/postgresql/16/bin
+      DATABASE_REVIEW_POSTGRES_URL: postgresql://postgres:ci-only-password@127.0.0.1:5432/progressrooms_ci
+      BILLING_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:ci-only-password@127.0.0.1:5432/progressrooms_ci
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,15 +44,23 @@ jobs:
             requirements.txt
             requirements-dev.txt
       - run: pip install -r requirements-dev.txt
+      - name: Install PostgreSQL 16 backup clients
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client-16
       - name: Verify migrations against PostgreSQL
         run: |
           alembic upgrade head
           alembic current
+          alembic check
+      - name: Check Python correctness
+        run: |
+          ruff check --select E9,F63,F7 app scripts tests
+          ruff check --select E4,E7,E9,F,I --per-file-ignores tests/test_remaining_audit.py:F811 app/core/financial_data.py app/core/observability.py app/core/password_work.py app/common/profile_consent.py scripts/encrypt_bank_accounts.py scripts/profile_runtime.py scripts/profile_password_work.py tests/test_remaining_audit.py
       - name: Run tests
         run: python -m pytest -q
       - name: Verify deployment script syntax
         run: |
           bash -n deploy/uat.sh
+          bash -n deploy/backup-db.sh
           bash -n deploy/setup-uat-validation.sh
           sh -n deploy/start-api.sh
       - name: Build API image
@@ -68,7 +81,7 @@ jobs:
           docker build --tag progressrooms-api-uat:${{ github.sha }} .
           mkdir bundle
           docker save progressrooms-api-uat:${{ github.sha }} | gzip > bundle/api-image.tar.gz
-          cp deploy/compose.api.yaml deploy/uat.sh deploy/setup-uat-validation.sh bundle/
+          cp deploy/compose.api.yaml deploy/uat.sh deploy/backup-db.sh deploy/setup-uat-validation.sh bundle/
       - name: Upload release to UAT
         uses: appleboy/scp-action@v1.0.0
         with:

@@ -13,7 +13,7 @@ from app.models.session import Session
 from app.models.organization import Organization, OrganizationMember, OrganizationStudent
 from app.models.user import User
 from app.models.attendance import AttendanceRecord
-from app.modules.auth.dependencies import get_current_user
+from app.modules.auth.dependencies import get_current_user, require_student
 from app.common.enums import EnrollmentStatus
 from app.modules.organizations.zoom_service import get_or_create_occurrence_meeting, ZoomAuthError
 
@@ -23,7 +23,7 @@ from app.models.membership_tier import MembershipTier
 class RescheduleBookingRequest(BaseModel):
     target_occurrence_id: uuid.UUID
 
-router = APIRouter(prefix="/student", tags=["Student Portal"])
+router = APIRouter(prefix="/student", tags=["Student Portal"], dependencies=[Depends(require_student)])
 
 @router.get("/studios")
 async def get_my_studios(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -111,13 +111,15 @@ async def get_my_upcoming_classes(
     now = datetime.now(timezone.utc)
     future = now + timedelta(days=30)
 
-    # Get active session IDs
+    # An appointment's enrollment may begin at its future start time. Show
+    # classes covered by that enrollment before it starts, too.
     enr_stmt = select(SessionEnrollment.session_id).where(
         SessionEnrollment.user_id == current_user.id,
         SessionEnrollment.status == EnrollmentStatus.ACTIVE.value,
-        SessionEnrollment.valid_from <= now,
-        or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until > now)
-    )
+        SessionEnrollment.valid_from <= ClassOccurrence.actual_start_at,
+        or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until > now),
+        or_(SessionEnrollment.valid_until.is_(None), SessionEnrollment.valid_until > ClassOccurrence.actual_start_at)
+    ).correlate(ClassOccurrence)
     excused_occ_ids = select(AttendanceRecord.class_occurrence_id).join(
         SessionEnrollment, AttendanceRecord.session_enrollment_id == SessionEnrollment.id
     ).where(
@@ -527,6 +529,8 @@ async def get_my_attendance(
             "startAt": occ_start.isoformat(),
             "endAt": (occ.actual_end_at.replace(tzinfo=timezone.utc) if occ.actual_end_at.tzinfo is None else occ.actual_end_at).isoformat(),
             "meetingAvailable": occ.status != "CANCELLED",
+            "meetingUrl": occ.meeting_url if occ.status != "CANCELLED" else None,
+            "description": session.full_description,
             "sessionTitle": session.name,
             "status": status_val,
             "remarks": record.notes if record else "",
@@ -539,3 +543,13 @@ async def get_my_attendance(
         result.append(event)
     return result
 
+
+
+@router.post("/classes/{occurrence_id}/send-invite", status_code=202)
+async def send_my_class_invite(occurrence_id: uuid.UUID, current_user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db)):
+    from app.modules.communication.reminder_engine import request_meeting_invites
+    occurrence = await db.scalar(select(ClassOccurrence).where(ClassOccurrence.id == occurrence_id).with_for_update())
+    if not occurrence:
+        raise HTTPException(404, "Class not found")
+    return await request_meeting_invites(db, occurrence, recipient_id=current_user.id)

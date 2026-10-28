@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base, TimestampMixin
@@ -14,7 +14,7 @@ class PlatformCommunicationSetting(Base, TimestampMixin):
     __tablename__ = "platform_communication_settings"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    whatsapp_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    whatsapp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     email_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -189,3 +189,21 @@ class StudioCommunicationBudget(Base, TimestampMixin):
 
     organization: Mapped["Organization"] = relationship("Organization")
 
+
+
+class MeetingEmailDelivery(Base, TimestampMixin):
+    """Durable per-recipient Zoom Mail outbox; uncertain submissions need review."""
+    __tablename__ = "meeting_email_deliveries"
+    __table_args__ = (UniqueConstraint("event_key", "recipient_user_id", name="uq_meeting_mail_event_recipient"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    class_occurrence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("class_occurrences.id", ondelete="CASCADE"), index=True)
+    recipient_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
+    event_key: Mapped[str] = mapped_column(String(255))
+    message_type: Mapped[str] = mapped_column(String(50))
+    scheduled_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    attempts: Mapped[int] = mapped_column(default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

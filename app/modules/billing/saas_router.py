@@ -1,3 +1,4 @@
+from app.common.webhook_body import read_webhook_body
 import hashlib
 import hmac
 import json
@@ -128,19 +129,15 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
     secret = settings.SAAS_RAZORPAY_WEBHOOK_SECRET
     if not secret or "mock" in secret.lower():
         raise HTTPException(503, "SaaS payment webhooks are not configured")
-    raw = bytearray()
-    async for chunk in request.stream():
-        raw.extend(chunk)
-        if len(raw) > 262144:
-            raise HTTPException(413, "Webhook payload too large")
+    raw = await read_webhook_body(request)
     expected = hmac.new(secret.encode(), bytes(raw), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, request.headers.get("X-Razorpay-Signature", "")):
+    if not hmac.compare_digest(expected.encode(), request.headers.get("X-Razorpay-Signature", "").encode()):
         raise HTTPException(400, "Invalid webhook signature")
     try:
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             raise ValueError()
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         raise HTTPException(400, "Invalid webhook payload")
     event_id = request.headers.get("x-razorpay-event-id") or hashlib.sha256(raw).hexdigest()
     if len(event_id) > 255:
